@@ -46,13 +46,13 @@ enum Command {
     /// Print the rclone binary that would be used
     WhichRclone {
         /// Apply this profile's rclone override
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Profiles, last run, and rclone path
     Status,
     /// Interactive profile list, state, and rclone log
     Tui,
-}
-
 }
 
 #[derive(Debug, Subcommand)]

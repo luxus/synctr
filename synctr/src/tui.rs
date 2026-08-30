@@ -121,13 +121,12 @@ fn refresh_last(ui: &mut Ui, paths: &Paths, name: &str) -> synctr_engine::Result
 }
 
 fn move_sel(ui: &mut Ui, delta: i32) {
+    let len = ui.rows.len() as i32;
+    if len == 0 {
+        return;
+    }
     let cur = ui.state.selected().unwrap_or(0) as i32;
     ui.state.select(Some((cur + delta).rem_euclid(len) as usize));
-}
-
-fn sync_selected(
-    store: &ProfileStore,
-        .select(Some((cur + delta).rem_euclid(len) as usize));
 }
 
 fn selected_profile(ui: &Ui) -> Option<&Profile> {
@@ -279,7 +278,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>)
         })
         .collect();
     frame.render_stateful_widget(
-        &mut ui.state,
+        List::new(items)
             .block(Block::default().borders(Borders::ALL).title("profiles"))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> "),
@@ -360,6 +359,11 @@ fn log_pane(ui: &Ui, height: u16) -> Paragraph<'static> {
 fn age_label(unix: i64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let d = (now - unix).max(0);
+    if d < 60 {
+        format!("{d}s ago")
     } else if d < 3600 {
         format!("{}m ago", d / 60)
     } else if d < 86400 {

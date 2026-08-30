@@ -132,3 +132,65 @@ fn which_rclone_json_with_explicit_binary() {
     assert_eq!(v["source"], "flag");
     assert_eq!(v["path"], fake.to_str().unwrap());
 }
+
+#[test]
+fn which_rclone_help_lists_profile_flag() {
+    let out = bin().args(["which-rclone", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--profile"));
+}
+
+#[test]
+fn which_rclone_profile_uses_profile_rclone_field() {
+    let root = scratch();
+    let fake = root.join("rclone-from-profile");
+    fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = fs::metadata(&fake).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&fake, p).unwrap();
+    }
+    let add = bin()
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "add",
+            "docs",
+            "--local",
+            "/tmp/docs",
+            "--remote",
+            "b2:bucket/docs",
+            "--mode",
+            "sync",
+            "--rclone",
+            fake.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let out = bin()
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "which-rclone",
+            "--profile",
+            "docs",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["found"], true);
+    assert_eq!(v["source"], "profile");
+    assert_eq!(v["path"], fake.to_str().unwrap());
+}

@@ -12,12 +12,12 @@ synctr profile list
 synctr profile show <name>
 synctr profile remove <name>
 synctr sync <name>
-synctr which-rclone
+synctr which-rclone [--profile NAME]
 synctr status
 synctr tui
 ```
 
-`--json` on `status`, `which-rclone`, and `profile list` prints structs a later Luau widget can `runAsync`. `--rclone PATH` overrides discovery. `--config-dir DIR` overrides XDG.
+`--json` on `status`, `which-rclone`, and `profile list` prints structs a later Luau widget can `runAsync`. `--rclone PATH` overrides discovery. `--config-dir DIR` overrides XDG. `which-rclone --profile NAME` uses that profile's `rclone` field.
 
 `synctr tui`: left pane is profiles, right is last run / rclone path / state, bottom is the rclone log. Enter starts or stops the selected profile through the engine. `q` quits.
 
@@ -54,7 +54,7 @@ One resolver, this order:
 5. `/opt/homebrew/bin/rclone`
 6. `/usr/local/bin/rclone`
 
-GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway. `synctr which-rclone` prints the path and why.
+GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway. `synctr which-rclone` prints the path and why. Pass `--profile NAME` to apply that profile's override.
 
 `synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, and `--use-json-log`, then the profile's extra flags. Exit status is rclone's.
 
