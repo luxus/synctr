@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  build:
+    needs: test
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-14
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "artifact=synctr-${version}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: cargo build --release --locked -p synctr --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p "${{ steps.ver.outputs.artifact }}"
+          cp "target/${{ matrix.target }}/release/synctr" "${{ steps.ver.outputs.artifact }}/synctr"
+          tar -czf "${{ steps.ver.outputs.artifact }}.tar.gz" "${{ steps.ver.outputs.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.artifact }}
+          path: ${{ steps.ver.outputs.artifact }}.tar.gz
