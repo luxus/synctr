@@ -23,6 +23,8 @@ pub enum Error {
     InvalidScheduleKind(String),
     #[error("interval must be greater than zero seconds")]
     InvalidInterval,
+    #[error("home directory not found (set HOME or XDG_CONFIG_HOME, or pass --dir)")]
+    HomeNotFound,
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("toml: {0}")]

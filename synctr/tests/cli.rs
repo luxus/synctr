@@ -519,6 +519,31 @@ fn schedule_generate_and_install_do_not_start_anything() {
         .unwrap();
     assert!(uninstall.status.success());
     assert!(!units.join("synctr-docs.service").exists());
+
+    let agents = root.join("agents");
+    let human = isolated(&root)
+        .args([
+            "schedule",
+            "install",
+            "docs",
+            "--kind",
+            "launchd",
+            "--interval",
+            "600",
+            "--bin",
+            "/opt/synctr/bin/synctr",
+            "--dir",
+            agents.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    let plist = agents.join("dev.luxus.synctr.docs.plist");
+    assert!(plist.is_file());
+    assert!(text.contains(&format!("launchctl load {}", plist.display())));
+    assert!(!text.contains("~/Library/LaunchAgents"));
+    assert!(text.contains(agents.to_str().unwrap()));
 }
 
 #[test]

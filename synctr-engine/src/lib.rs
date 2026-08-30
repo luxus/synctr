@@ -21,7 +21,7 @@ pub use runner::{
     SyncOutcome,
 };
 pub use schedule::{
-    default_install_dir, generate_schedule, install_schedule, schedule_filenames,
+    default_install_dir, enable_hint, generate_schedule, install_schedule, schedule_filenames,
     uninstall_schedule, ScheduleFile, ScheduleKind, ScheduleSpec,
 };
 pub use status::{

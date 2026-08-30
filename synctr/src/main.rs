@@ -4,8 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use synctr_engine::{
-    default_install_dir, generate_schedule, install_schedule, resolve_rclone_live, status_snapshot,
-    uninstall_schedule, Mode, Paths, Profile, ProfileEdit, ProfileStore, RcloneJson, ScheduleKind,
+    default_install_dir, enable_hint, generate_schedule, install_schedule, resolve_rclone_live,
+    status_snapshot, uninstall_schedule, Mode, Paths, Profile, ProfileEdit, ProfileStore,
+    RcloneJson, ScheduleKind,
 };
 
 mod tui;
@@ -394,7 +395,11 @@ fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
         } => {
             let kind = schedule_kind(kind)?;
             let spec = generate_schedule(kind, &name, &synctr_bin(bin)?, interval)?;
-            let dest = dir.unwrap_or_else(|| default_install_dir(kind));
+            let used_default = dir.is_none();
+            let dest = match dir {
+                Some(d) => d,
+                None => default_install_dir(kind)?,
+            };
             let written = install_schedule(&dest, &spec)?;
             if json {
                 print_json(&serde_json::json!({
@@ -407,23 +412,15 @@ fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
                 for path in &written {
                     println!("{}", path.display());
                 }
-                match kind {
-                    ScheduleKind::Systemd => {
-                        println!(
-                            "not enabled. to start: systemctl --user enable --now synctr-{name}.timer"
-                        );
-                    }
-                    ScheduleKind::Launchd => {
-                        println!(
-                            "not loaded. to start: launchctl load ~/Library/LaunchAgents/dev.luxus.synctr.{name}.plist"
-                        );
-                    }
-                }
+                println!("{}", enable_hint(kind, &dest, &name, used_default));
             }
         }
         ScheduleCmd::Uninstall { name, kind, dir } => {
             let kind = schedule_kind(kind)?;
-            let dest = dir.unwrap_or_else(|| default_install_dir(kind));
+            let dest = match dir {
+                Some(d) => d,
+                None => default_install_dir(kind)?,
+            };
             let removed = uninstall_schedule(&dest, kind, &name)?;
             if json {
                 print_json(&serde_json::json!({

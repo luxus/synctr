@@ -85,22 +85,54 @@ pub fn schedule_filenames(kind: ScheduleKind, name: &str) -> Vec<String> {
     }
 }
 
-pub fn default_install_dir(kind: ScheduleKind) -> PathBuf {
+pub fn default_install_dir(kind: ScheduleKind) -> Result<PathBuf> {
+    install_dir_from(
+        kind,
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn install_dir_from(
+    kind: ScheduleKind,
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
     match kind {
         ScheduleKind::Systemd => {
-            let base = std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("/"))
-                        .join(".config")
-                });
-            base.join("systemd/user")
+            if let Some(xdg) = xdg_config_home {
+                return Ok(xdg.join("systemd/user"));
+            }
+            let home = home.ok_or(Error::HomeNotFound)?;
+            Ok(home.join(".config/systemd/user"))
         }
-        ScheduleKind::Launchd => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/"))
-            .join("Library/LaunchAgents"),
+        ScheduleKind::Launchd => {
+            let home = home.ok_or(Error::HomeNotFound)?;
+            Ok(home.join("Library/LaunchAgents"))
+        }
+    }
+}
+
+pub fn enable_hint(kind: ScheduleKind, dest: &Path, name: &str, used_default: bool) -> String {
+    match kind {
+        ScheduleKind::Systemd => {
+            let mut hint = format!(
+                "not enabled. to start: systemctl --user enable --now synctr-{name}.timer"
+            );
+            if !used_default {
+                hint.push_str(&format!(
+                    "\nwrote under {}; systemd --user only loads from the user unit dir unless you link these files there",
+                    dest.display()
+                ));
+            }
+            hint
+        }
+        ScheduleKind::Launchd => {
+            let plist = dest.join(format!("dev.luxus.synctr.{name}.plist"));
+            format!("not loaded. to start: launchctl load {}", plist.display())
+        }
     }
 }
 
@@ -294,5 +326,51 @@ mod tests {
         )
         .unwrap();
         assert!(spec.files[0].body.contains("/tmp/syn&amp;ctr"));
+    }
+
+    #[test]
+    fn missing_home_is_an_error_not_root() {
+        assert!(matches!(
+            install_dir_from(ScheduleKind::Launchd, None, None),
+            Err(Error::HomeNotFound)
+        ));
+        assert!(matches!(
+            install_dir_from(ScheduleKind::Systemd, None, None),
+            Err(Error::HomeNotFound)
+        ));
+        let systemd = install_dir_from(
+            ScheduleKind::Systemd,
+            Some(PathBuf::from("/xdg")),
+            None,
+        )
+        .unwrap();
+        assert_eq!(systemd, PathBuf::from("/xdg/systemd/user"));
+        let launchd = install_dir_from(
+            ScheduleKind::Launchd,
+            None,
+            Some(PathBuf::from("/Users/luxus")),
+        )
+        .unwrap();
+        assert_eq!(launchd, PathBuf::from("/Users/luxus/Library/LaunchAgents"));
+    }
+
+    #[test]
+    fn launchd_hint_uses_the_install_dir() {
+        let hint = enable_hint(
+            ScheduleKind::Launchd,
+            Path::new("/tmp/agents"),
+            "docs",
+            false,
+        );
+        assert!(hint.contains("launchctl load /tmp/agents/dev.luxus.synctr.docs.plist"));
+        assert!(!hint.contains("~/Library/LaunchAgents"));
+        let systemd = enable_hint(
+            ScheduleKind::Systemd,
+            Path::new("/tmp/units"),
+            "docs",
+            false,
+        );
+        assert!(systemd.contains("systemctl --user enable --now synctr-docs.timer"));
+        assert!(systemd.contains("/tmp/units"));
     }
 }
