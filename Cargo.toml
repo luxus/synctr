@@ -1,0 +1,17 @@
+[workspace]
+members = ["synctr-engine", "synctr"]
+default-members = ["synctr"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "=1.0.217", features = ["derive"] }
+thiserror = "=2.0.11"
+toml = "=0.8.23"
+dirs = "=6.0.0"
