@@ -17,6 +17,14 @@ pub enum Error {
     RcloneNotFound,
     #[error("rclone override not found ({origin}): {path}")]
     RcloneOverrideMissing { origin: String, path: PathBuf },
+    #[error("nothing to change")]
+    EmptyEdit,
+    #[error("unknown schedule kind `{0}` (want systemd or launchd)")]
+    InvalidScheduleKind(String),
+    #[error("interval must be greater than zero seconds")]
+    InvalidInterval,
+    #[error("home directory not found (set HOME or XDG_CONFIG_HOME, or pass --dir)")]
+    HomeNotFound,
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("toml: {0}")]

@@ -4,12 +4,14 @@ mod paths;
 mod profile;
 mod rclone;
 mod runner;
+mod schedule;
 mod status;
+mod watch;
 
 pub use error::{Error, Result};
 pub use ignore::{load_filters, FilterRule, FilterSet, DEFAULT_PATTERNS};
 pub use paths::Paths;
-pub use profile::{validate_name, Mode, Profile, ProfileStore};
+pub use profile::{validate_name, Mode, Profile, ProfileEdit, ProfileStore};
 pub use rclone::{
     resolve_rclone, resolve_rclone_live, well_known, FsProbe, RealFs, ResolveRequest,
     ResolveSource, ResolvedRclone,
@@ -18,10 +20,15 @@ pub use runner::{
     build_sync_argv, execute_sync, prepare_filter_file, run_sync, spawn_sync, SyncArgv,
     SyncOutcome,
 };
+pub use schedule::{
+    default_install_dir, enable_hint, generate_schedule, install_schedule, schedule_filenames,
+    uninstall_schedule, ScheduleFile, ScheduleKind, ScheduleSpec,
+};
 pub use status::{
     read_last_run, status_snapshot, write_last_run, LastRun, ProfileStatus, RcloneJson,
     StatusSnapshot,
 };
+pub use watch::{path_should_wake, Debouncer};
 
 #[cfg(test)]
 pub(crate) mod testutil {

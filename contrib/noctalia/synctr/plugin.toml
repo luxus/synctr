@@ -1,0 +1,13 @@
+id = "luxus/synctr"
+name = "synctr"
+version = "0.1.0"
+plugin_api = 3
+author = "luxus"
+license = "MIT"
+description = "Bar widget that shells synctr status --json. Same JSON as the CLI."
+tags = ["rclone", "sync"]
+icon = "cloud"
+
+[[widget]]
+id = "status"
+entry = "widget.luau"

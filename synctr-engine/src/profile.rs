@@ -58,6 +58,27 @@ pub struct Profile {
     pub extra_ignore: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileEdit {
+    pub local: Option<PathBuf>,
+    pub remote: Option<String>,
+    pub mode: Option<Mode>,
+    pub rclone: Option<Option<PathBuf>>,
+    pub extra_flags: Option<Vec<String>>,
+    pub extra_ignore: Option<Vec<String>>,
+}
+
+impl ProfileEdit {
+    pub fn is_empty(&self) -> bool {
+        self.local.is_none()
+            && self.remote.is_none()
+            && self.mode.is_none()
+            && self.rclone.is_none()
+            && self.extra_flags.is_none()
+            && self.extra_ignore.is_none()
+    }
+}
+
 impl Profile {
     pub fn new(
         name: String,
@@ -154,6 +175,70 @@ impl ProfileStore {
         let _ = fs::remove_file(self.paths.last_run(name));
         Ok(())
     }
+
+    pub fn edit(&self, name: &str, edit: ProfileEdit) -> Result<Profile> {
+        if edit.is_empty() {
+            return Err(Error::EmptyEdit);
+        }
+        let mut profile = self.get(name)?;
+        if let Some(local) = edit.local {
+            profile.local = expand_tilde(&local);
+        }
+        if let Some(remote) = edit.remote {
+            if !remote.contains(':') {
+                return Err(Error::InvalidRemote(remote));
+            }
+            profile.remote = remote;
+        }
+        if let Some(mode) = edit.mode {
+            profile.mode = mode;
+        }
+        if let Some(rclone) = edit.rclone {
+            profile.rclone = rclone.map(|p| expand_tilde(&p));
+        }
+        if let Some(extra_flags) = edit.extra_flags {
+            profile.extra_flags = extra_flags;
+        }
+        if let Some(extra_ignore) = edit.extra_ignore {
+            profile.extra_ignore = extra_ignore;
+        }
+        let dest = self.paths.profile_toml(name);
+        fs::write(dest, toml::to_string_pretty(&profile)?)?;
+        Ok(profile)
+    }
+
+    pub fn rename(&self, old: &str, new: &str) -> Result<Profile> {
+        validate_name(old)?;
+        validate_name(new)?;
+        if old == new {
+            return self.get(old);
+        }
+        let src = self.paths.profile_toml(old);
+        if !src.is_file() {
+            return Err(Error::ProfileNotFound(old.to_string()));
+        }
+        let dest = self.paths.profile_toml(new);
+        if dest.exists() {
+            return Err(Error::ProfileExists(new.to_string()));
+        }
+        let mut profile = self.get(old)?;
+        profile.name = new.to_string();
+        fs::rename(&src, &dest)?;
+        fs::write(&dest, toml::to_string_pretty(&profile)?)?;
+        let old_ignore = self.paths.profile_ignore(old);
+        if old_ignore.exists() {
+            fs::rename(old_ignore, self.paths.profile_ignore(new))?;
+        }
+        let old_run = self.paths.last_run(old);
+        if old_run.exists() {
+            let new_run = self.paths.last_run(new);
+            if let Some(parent) = new_run.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(old_run, new_run)?;
+        }
+        Ok(profile)
+    }
 }
 
 fn load_file(path: &Path) -> Result<Profile> {
@@ -202,6 +287,75 @@ mod tests {
         store.remove("docs").unwrap();
         assert!(store.list().unwrap().is_empty());
         assert!(matches!(store.get("docs"), Err(Error::ProfileNotFound(_))));
+    }
+
+    #[test]
+    fn edit_rewrites_same_toml_and_keeps_last_run() {
+        let (_root, paths) = scratch("profile-edit");
+        let store = ProfileStore::new(paths.clone());
+        let p = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec!["--checksum".into()],
+            vec!["*.key".into()],
+        )
+        .unwrap();
+        store.add(&p).unwrap();
+        crate::status::write_last_run(&paths, "docs", crate::status::LastRun::now(0)).unwrap();
+        let edited = store
+            .edit(
+                "docs",
+                ProfileEdit {
+                    remote: Some("b2:bucket/other".into()),
+                    mode: Some(Mode::Copy),
+                    extra_flags: Some(vec!["--fast-list".into()]),
+                    extra_ignore: Some(vec!["*.tmp".into()]),
+                    ..ProfileEdit::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(edited.remote, "b2:bucket/other");
+        assert_eq!(edited.mode, Mode::Copy);
+        assert_eq!(edited.extra_flags, vec!["--fast-list"]);
+        assert_eq!(store.get("docs").unwrap(), edited);
+        assert!(paths.profile_toml("docs").is_file());
+        assert!(crate::status::read_last_run(&paths, "docs")
+            .unwrap()
+            .is_some());
+        assert!(matches!(store.edit("docs", ProfileEdit::default()), Err(Error::EmptyEdit)));
+    }
+
+    #[test]
+    fn rename_moves_toml_ignore_and_last_run() {
+        let (_root, paths) = scratch("profile-rename");
+        let store = ProfileStore::new(paths.clone());
+        let p = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&p).unwrap();
+        crate::status::write_last_run(&paths, "docs", crate::status::LastRun::now(0)).unwrap();
+        fs::write(paths.profile_ignore("docs"), "*.tmp\n").unwrap();
+        let renamed = store.rename("docs", "notes").unwrap();
+        assert_eq!(renamed.name, "notes");
+        assert!(matches!(store.get("docs"), Err(Error::ProfileNotFound(_))));
+        assert_eq!(store.get("notes").unwrap().remote, "b2:bucket/docs");
+        assert!(!paths.profile_toml("docs").exists());
+        assert!(!paths.profile_ignore("docs").exists());
+        assert!(!paths.last_run("docs").exists());
+        assert_eq!(fs::read_to_string(paths.profile_ignore("notes")).unwrap(), "*.tmp\n");
+        assert!(crate::status::read_last_run(&paths, "notes")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

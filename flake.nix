@@ -27,6 +27,7 @@
                 ./Cargo.lock
                 ./synctr
                 ./synctr-engine
+                ./contrib
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
