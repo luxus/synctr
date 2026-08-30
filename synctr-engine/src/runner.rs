@@ -32,7 +32,12 @@ pub struct SyncOutcome {
     pub stderr: Option<Vec<u8>>,
 }
 
-pub fn build_sync_argv(rclone: &Path, profile: &Profile, filter_file: &Path) -> SyncArgv {
+pub fn build_sync_argv(
+    rclone: &Path,
+    profile: &Profile,
+    filter_file: &Path,
+    dry_run: bool,
+) -> SyncArgv {
     let mut args: Vec<OsString> = vec![
         profile.mode.rclone_subcommand().into(),
         profile.local.clone().into(),
@@ -44,6 +49,9 @@ pub fn build_sync_argv(rclone: &Path, profile: &Profile, filter_file: &Path) -> 
     ];
     for flag in &profile.extra_flags {
         args.push(flag.into());
+    }
+    if dry_run {
+        args.push("--dry-run".into());
     }
     SyncArgv {
         program: rclone.to_path_buf(),
@@ -65,9 +73,10 @@ pub fn spawn_sync(
     paths: &Paths,
     profile: &Profile,
     resolved: &ResolvedRclone,
+    dry_run: bool,
 ) -> Result<Child> {
     let filter = prepare_filter_file(paths, profile)?;
-    let argv = build_sync_argv(&resolved.path, profile, &filter);
+    let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -80,9 +89,10 @@ pub fn run_sync(
     profile: &Profile,
     rclone_flag: Option<&Path>,
     inherit_stdio: bool,
+    dry_run: bool,
 ) -> Result<SyncOutcome> {
     let resolved = resolve_rclone_live(rclone_flag, profile.rclone.as_deref())?;
-    execute_sync(paths, profile, resolved, inherit_stdio)
+    execute_sync(paths, profile, resolved, inherit_stdio, dry_run)
 }
 
 pub fn execute_sync(
@@ -90,9 +100,10 @@ pub fn execute_sync(
     profile: &Profile,
     resolved: ResolvedRclone,
     inherit_stdio: bool,
+    dry_run: bool,
 ) -> Result<SyncOutcome> {
     let filter = prepare_filter_file(paths, profile)?;
-    let argv = build_sync_argv(&resolved.path, profile, &filter);
+    let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
     if inherit_stdio {
         cmd.stdin(Stdio::inherit())
@@ -143,6 +154,7 @@ mod tests {
             Path::new("/usr/bin/rclone"),
             &profile,
             Path::new("/tmp/docs.filter"),
+            false,
         );
         assert_eq!(argv.program, PathBuf::from("/usr/bin/rclone"));
         let args: Vec<String> = argv
@@ -164,6 +176,21 @@ mod tests {
             ]
         );
         assert!(args.iter().all(|a| !a.contains(" --")));
+        assert!(!args.iter().any(|a| a == "--dry-run"));
+
+        let dry = build_sync_argv(
+            Path::new("/usr/bin/rclone"),
+            &profile,
+            Path::new("/tmp/docs.filter"),
+            true,
+        );
+        let dry_args: Vec<String> = dry
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&dry_args[..args.len()], args.as_slice());
+        assert_eq!(dry_args.last().map(String::as_str), Some("--dry-run"));
     }
 
     #[test]
@@ -186,7 +213,7 @@ mod tests {
             path: bin,
             source: ResolveSource::Profile,
         };
-        let outcome = execute_sync(&paths, &profile, resolved, false).unwrap();
+        let outcome = execute_sync(&paths, &profile, resolved, false, false).unwrap();
         assert_eq!(outcome.exit_code, 7);
         let last = crate::status::read_last_run(&paths, "docs").unwrap().unwrap();
         assert_eq!(last.exit_code, 7);
@@ -221,7 +248,7 @@ mod tests {
             path: bin,
             source: ResolveSource::Profile,
         };
-        let mut child = spawn_sync(&paths, &profile, &resolved).unwrap();
+        let mut child = spawn_sync(&paths, &profile, &resolved, false).unwrap();
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());

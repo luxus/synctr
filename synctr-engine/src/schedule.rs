@@ -1,0 +1,298 @@
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::error::{Error, Result};
+use crate::profile::validate_name;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleKind {
+    Systemd,
+    Launchd,
+}
+
+impl ScheduleKind {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "systemd" => Ok(Self::Systemd),
+            "launchd" => Ok(Self::Launchd),
+            other => Err(Error::InvalidScheduleKind(other.to_string())),
+        }
+    }
+
+    pub fn default_for_host() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Launchd
+        } else {
+            Self::Systemd
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Systemd => "systemd",
+            Self::Launchd => "launchd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleFile {
+    pub name: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleSpec {
+    pub kind: ScheduleKind,
+    pub interval_secs: u64,
+    pub bin: PathBuf,
+    pub profile: String,
+    pub files: Vec<ScheduleFile>,
+}
+
+pub fn generate_schedule(
+    kind: ScheduleKind,
+    name: &str,
+    bin: &Path,
+    interval_secs: u64,
+) -> Result<ScheduleSpec> {
+    validate_name(name)?;
+    if interval_secs == 0 {
+        return Err(Error::InvalidInterval);
+    }
+    let files = match kind {
+        ScheduleKind::Systemd => systemd_files(name, bin, interval_secs),
+        ScheduleKind::Launchd => vec![launchd_file(name, bin, interval_secs)],
+    };
+    Ok(ScheduleSpec {
+        kind,
+        interval_secs,
+        bin: bin.to_path_buf(),
+        profile: name.to_string(),
+        files,
+    })
+}
+
+pub fn schedule_filenames(kind: ScheduleKind, name: &str) -> Vec<String> {
+    match kind {
+        ScheduleKind::Systemd => vec![
+            format!("synctr-{name}.service"),
+            format!("synctr-{name}.timer"),
+        ],
+        ScheduleKind::Launchd => vec![format!("dev.luxus.synctr.{name}.plist")],
+    }
+}
+
+pub fn default_install_dir(kind: ScheduleKind) -> PathBuf {
+    match kind {
+        ScheduleKind::Systemd => {
+            let base = std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("/"))
+                        .join(".config")
+                });
+            base.join("systemd/user")
+        }
+        ScheduleKind::Launchd => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join("Library/LaunchAgents"),
+    }
+}
+
+pub fn install_schedule(dir: &Path, spec: &ScheduleSpec) -> Result<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir)?;
+    let mut written = Vec::new();
+    for file in &spec.files {
+        let dest = dir.join(&file.name);
+        std::fs::write(&dest, &file.body)?;
+        written.push(dest);
+    }
+    Ok(written)
+}
+
+pub fn uninstall_schedule(dir: &Path, kind: ScheduleKind, name: &str) -> Result<Vec<PathBuf>> {
+    validate_name(name)?;
+    let mut removed = Vec::new();
+    for file in schedule_filenames(kind, name) {
+        let dest = dir.join(file);
+        if dest.exists() {
+            std::fs::remove_file(&dest)?;
+            removed.push(dest);
+        }
+    }
+    Ok(removed)
+}
+
+fn systemd_files(name: &str, bin: &Path, interval_secs: u64) -> Vec<ScheduleFile> {
+    let exec = format!("{} sync {}", systemd_quote(&bin.display().to_string()), name);
+    let service = format!(
+        "[Unit]\nDescription=synctr sync {name}\n\n[Service]\nType=oneshot\nExecStart={exec}\n"
+    );
+    let timer = format!(
+        "[Unit]\nDescription=synctr timer for {name}\n\n[Timer]\nOnBootSec=1min\nOnUnitActiveSec={interval_secs}s\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
+    );
+    vec![
+        ScheduleFile {
+            name: format!("synctr-{name}.service"),
+            body: service,
+        },
+        ScheduleFile {
+            name: format!("synctr-{name}.timer"),
+            body: timer,
+        },
+    ]
+}
+
+fn launchd_file(name: &str, bin: &Path, interval_secs: u64) -> ScheduleFile {
+    let label = format!("dev.luxus.synctr.{name}");
+    let bin_xml = xml_escape(&bin.display().to_string());
+    let name_xml = xml_escape(name);
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{label}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{bin_xml}</string>
+		<string>sync</string>
+		<string>{name_xml}</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>{interval_secs}</integer>
+	<key>RunAtLoad</key>
+	<false/>
+</dict>
+</plist>
+"#
+    );
+    ScheduleFile {
+        name: format!("{label}.plist"),
+        body,
+    }
+}
+
+fn systemd_quote(s: &str) -> String {
+    if s.chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+    {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    } else {
+        s.to_string()
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::scratch;
+
+    #[test]
+    fn systemd_unit_calls_synctr_sync_on_interval() {
+        let spec = generate_schedule(
+            ScheduleKind::Systemd,
+            "docs",
+            Path::new("/opt/synctr/bin/synctr"),
+            1800,
+        )
+        .unwrap();
+        assert_eq!(spec.files.len(), 2);
+        assert_eq!(spec.files[0].name, "synctr-docs.service");
+        assert!(spec.files[0]
+            .body
+            .contains("ExecStart=/opt/synctr/bin/synctr sync docs"));
+        assert!(spec.files[0].body.contains("Type=oneshot"));
+        assert_eq!(spec.files[1].name, "synctr-docs.timer");
+        assert!(spec.files[1].body.contains("OnUnitActiveSec=1800s"));
+        assert!(spec.files[1].body.contains("WantedBy=timers.target"));
+        assert!(!spec.files.iter().any(|f| f.body.contains("systemctl")));
+    }
+
+    #[test]
+    fn launchd_plist_uses_program_arguments_not_a_shell() {
+        let spec = generate_schedule(
+            ScheduleKind::Launchd,
+            "docs",
+            Path::new("/opt/synctr/bin/synctr"),
+            600,
+        )
+        .unwrap();
+        assert_eq!(spec.files.len(), 1);
+        assert_eq!(spec.files[0].name, "dev.luxus.synctr.docs.plist");
+        let body = &spec.files[0].body;
+        assert!(body.contains("<string>dev.luxus.synctr.docs</string>"));
+        assert!(body.contains("<string>/opt/synctr/bin/synctr</string>"));
+        assert!(body.contains("<string>sync</string>"));
+        assert!(body.contains("<string>docs</string>"));
+        assert!(body.contains("<integer>600</integer>"));
+        assert!(!body.contains("launchctl"));
+    }
+
+    #[test]
+    fn install_writes_and_uninstall_removes_without_starting_anything() {
+        let (root, _paths) = scratch("schedule-install");
+        let dir = root.join("units");
+        let spec = generate_schedule(
+            ScheduleKind::Systemd,
+            "docs",
+            Path::new("/bin/synctr"),
+            3600,
+        )
+        .unwrap();
+        let written = install_schedule(&dir, &spec).unwrap();
+        assert_eq!(written.len(), 2);
+        assert!(dir.join("synctr-docs.service").is_file());
+        assert!(dir.join("synctr-docs.timer").is_file());
+        let removed = uninstall_schedule(&dir, ScheduleKind::Systemd, "docs").unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(!dir.join("synctr-docs.service").exists());
+        assert!(!dir.join("synctr-docs.timer").exists());
+    }
+
+    #[test]
+    fn rejects_zero_interval_and_bad_kind() {
+        assert!(matches!(
+            generate_schedule(ScheduleKind::Systemd, "docs", Path::new("/bin/synctr"), 0),
+            Err(Error::InvalidInterval)
+        ));
+        assert!(matches!(
+            ScheduleKind::parse("cron"),
+            Err(Error::InvalidScheduleKind(_))
+        ));
+    }
+
+    #[test]
+    fn xml_escapes_bin_path() {
+        let spec = generate_schedule(
+            ScheduleKind::Launchd,
+            "docs",
+            Path::new("/tmp/syn&ctr"),
+            60,
+        )
+        .unwrap();
+        assert!(spec.files[0].body.contains("/tmp/syn&amp;ctr"));
+    }
+}

@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use synctr_engine::{
     read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths, Profile,
@@ -55,7 +55,10 @@ struct Ui {
     rows: Vec<Row>,
     state: ListState,
     log: Arc<Mutex<Vec<String>>>,
+    log_offset: usize,
+    log_height: usize,
     running: Option<Running>,
+    help: bool,
 }
 
 fn event_loop(
@@ -78,38 +81,70 @@ fn event_loop(
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if ui.help {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    stop_running(&mut ui, store.paths())?;
+                    return Ok(());
+                }
+                KeyCode::Char('?') | KeyCode::Char('h') => ui.help = false,
+                _ => {}
+            }
+            continue;
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => {
                 stop_running(&mut ui, store.paths())?;
                 return Ok(());
             }
+            KeyCode::Char('?') | KeyCode::Char('h') => ui.help = true,
             KeyCode::Char('j') | KeyCode::Down => move_sel(&mut ui, 1),
             KeyCode::Char('k') | KeyCode::Up => move_sel(&mut ui, -1),
-            KeyCode::Enter => toggle_selected(&mut ui, store, rclone_flag)?,
+            KeyCode::PageUp => scroll_log(&mut ui, 1),
+            KeyCode::PageDown => scroll_log(&mut ui, -1),
+            KeyCode::Char('r') => reload_profiles(&mut ui, store)?,
+            KeyCode::Enter => toggle_selected(&mut ui, store, rclone_flag, false)?,
+            KeyCode::Char('d') => toggle_selected(&mut ui, store, rclone_flag, true)?,
             _ => {}
         }
     }
 }
 
 fn load_ui(store: &ProfileStore) -> synctr_engine::Result<Ui> {
+    let mut ui = Ui {
+        rows: Vec::new(),
+        state: ListState::default(),
+        log: Arc::new(Mutex::new(Vec::new())),
+        log_offset: 0,
+        log_height: 1,
+        running: None,
+        help: false,
+    };
+    load_rows(&mut ui, store)?;
+    Ok(ui)
+}
+
+fn load_rows(ui: &mut Ui, store: &ProfileStore) -> synctr_engine::Result<()> {
+    let selected = selected_profile(ui).map(|p| p.name.clone());
     let profiles = store.list()?;
-    let rows = profiles
+    ui.rows = profiles
         .into_iter()
         .map(|profile| {
             let last = read_last_run(store.paths(), &profile.name)?;
             Ok(Row { profile, last })
         })
         .collect::<synctr_engine::Result<Vec<_>>>()?;
-    let mut state = ListState::default();
-    if !rows.is_empty() {
-        state.select(Some(0));
-    }
-    Ok(Ui {
-        rows,
-        state,
-        log: Arc::new(Mutex::new(Vec::new())),
-        running: None,
-    })
+    let idx = selected
+        .and_then(|name| ui.rows.iter().position(|r| r.profile.name == name))
+        .or(if ui.rows.is_empty() { None } else { Some(0) });
+    ui.state.select(idx);
+    Ok(())
+}
+
+fn reload_profiles(ui: &mut Ui, store: &ProfileStore) -> synctr_engine::Result<()> {
+    load_rows(ui, store)?;
+    push_log(&ui.log, "reloaded profiles".into());
+    Ok(())
 }
 
 fn refresh_last(ui: &mut Ui, paths: &Paths, name: &str) -> synctr_engine::Result<()> {
@@ -129,6 +164,24 @@ fn move_sel(ui: &mut Ui, delta: i32) {
     ui.state.select(Some((cur + delta).rem_euclid(len) as usize));
 }
 
+fn log_window(len: usize, height: usize, offset: usize) -> (usize, usize) {
+    let inner = height.max(1);
+    let max_off = len.saturating_sub(inner);
+    let off = offset.min(max_off);
+    let end = len.saturating_sub(off);
+    let start = end.saturating_sub(inner);
+    (start, end)
+}
+
+fn scroll_log(ui: &mut Ui, pages: i32) {
+    let len = ui.log.lock().map(|g| g.len()).unwrap_or(0);
+    let inner = ui.log_height.max(1);
+    let max_off = len.saturating_sub(inner);
+    let delta = pages * inner as i32;
+    let next = ui.log_offset as i32 + delta;
+    ui.log_offset = next.clamp(0, max_off as i32) as usize;
+}
+
 fn selected_profile(ui: &Ui) -> Option<&Profile> {
     ui.state
         .selected()
@@ -144,6 +197,7 @@ fn toggle_selected(
     ui: &mut Ui,
     store: &ProfileStore,
     rclone_flag: Option<&Path>,
+    dry_run: bool,
 ) -> synctr_engine::Result<()> {
     let Some(name) = selected_profile(ui).map(|p| p.name.clone()) else {
         return Ok(());
@@ -163,7 +217,7 @@ fn toggle_selected(
         .map(|r| r.profile.clone())
         .expect("selected profile");
     let resolved = resolve_rclone_live(rclone_flag, profile.rclone.as_deref())?;
-    start_profile(ui, store.paths(), &profile, resolved)
+    start_profile(ui, store.paths(), &profile, resolved, dry_run)
 }
 
 fn start_profile(
@@ -171,12 +225,11 @@ fn start_profile(
     paths: &Paths,
     profile: &Profile,
     resolved: ResolvedRclone,
+    dry_run: bool,
 ) -> synctr_engine::Result<()> {
-    push_log(
-        &ui.log,
-        format!("--- {} {} ---", profile.mode, profile.name),
-    );
-    let mut child = spawn_sync(paths, profile, &resolved)?;
+    let tag = if dry_run { "dry-run" } else { profile.mode.as_str() };
+    push_log(&ui.log, format!("--- {tag} {} ---", profile.name));
+    let mut child = spawn_sync(paths, profile, &resolved, dry_run)?;
     if let Some(out) = child.stdout.take() {
         spawn_pipe_reader(out, ui.log.clone());
     }
@@ -287,11 +340,38 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>)
     );
 
     frame.render_widget(detail_pane(ui, rclone_flag), top[1]);
+    ui.log_height = root[1].height.saturating_sub(2) as usize;
     frame.render_widget(log_pane(ui, root[1].height), root[1]);
     frame.render_widget(
-        Paragraph::new("enter start/stop  j/k  q"),
+        Paragraph::new("enter start/stop  d dry-run  j/k  pgup/pgdn log  r reload  ? help  q"),
         root[2],
     );
+    if ui.help {
+        frame.render_widget(Clear, frame.area());
+        frame.render_widget(help_pane(), frame.area());
+    }
+}
+
+fn help_pane() -> Paragraph<'static> {
+    let text = vec![
+        Line::from(Span::styled(
+            "keys",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("enter     start or stop the selected profile"),
+        Line::from("d         dry-run the selected profile (rclone --dry-run)"),
+        Line::from("j / k     next / previous profile"),
+        Line::from("pgup/pgdn scroll rclone log"),
+        Line::from("r         reload profiles from disk"),
+        Line::from("? / h     close this pane"),
+        Line::from("q / esc   quit"),
+        Line::from(""),
+        Line::from("one rclone child at a time. Enter on another profile stops the current one."),
+        Line::from("directory watch is `synctr watch`, not this TUI."),
+    ];
+    Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title("help"))
+        .wrap(Wrap { trim: false })
 }
 
 fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
@@ -343,16 +423,21 @@ fn log_pane(ui: &Ui, height: u16) -> Paragraph<'static> {
     let inner = height.saturating_sub(2) as usize;
     let lines = match ui.log.lock() {
         Ok(g) => {
-            let start = g.len().saturating_sub(inner.max(1));
-            g[start..]
+            let (start, end) = log_window(g.len(), inner, ui.log_offset);
+            g[start..end]
                 .iter()
                 .map(|s| Line::from(s.clone()))
                 .collect::<Vec<_>>()
         }
         Err(_) => Vec::new(),
     };
+    let title = if ui.log_offset == 0 {
+        "rclone log".to_string()
+    } else {
+        format!("rclone log  +{}", ui.log_offset)
+    };
     Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("rclone log"))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
 }
 
@@ -370,5 +455,19 @@ fn age_label(unix: i64) -> String {
         format!("{}h ago", d / 3600)
     } else {
         format!("{}d ago", d / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_window;
+
+    #[test]
+    fn log_window_pins_to_tail_then_scrolls() {
+        assert_eq!(log_window(10, 4, 0), (6, 10));
+        assert_eq!(log_window(10, 4, 2), (4, 8));
+        assert_eq!(log_window(10, 4, 99), (0, 4));
+        assert_eq!(log_window(3, 8, 0), (0, 3));
+        assert_eq!(log_window(0, 4, 0), (0, 0));
     }
 }

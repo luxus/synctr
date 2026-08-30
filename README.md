@@ -2,7 +2,9 @@
 
 CLI and TUI for rclone folder sync. Profiles live as TOML. Ignore rules are gitignore-style and become rclone `--filter-from` when a sync runs. The engine library has no clap or ratatui; `synctr` is the frontend.
 
-Works on macOS and Linux/NixOS. No GUI, launchd, telemetry, or File Provider.
+Works on macOS and Linux/NixOS. rclone is a subprocess, not librclone. synctr does not run `rclone config` and does not create Drive remotes. The remote in `remote:path` must already exist.
+
+bisync needs a first `--resync` (or rclone's equivalent) before it will run normally. synctr does not pass that automatically. The first `synctr sync` on a new bisync profile will fail with rclone's error until you resync yourself.
 
 ## Commands
 
@@ -10,16 +12,31 @@ Works on macOS and Linux/NixOS. No GUI, launchd, telemetry, or File Provider.
 synctr profile add <name> --local PATH --remote remote:path --mode copy|sync|bisync
 synctr profile list
 synctr profile show <name>
+synctr profile edit <name> [--local PATH] [--remote remote:path] [--mode copy|sync|bisync]
+                             [--rclone PATH | --clear-rclone]
+                             [--flag ARG ...] [--clear-flags]
+                             [--ignore PATTERN ...] [--clear-ignore]
+synctr profile rename <old> <new>
 synctr profile remove <name>
-synctr sync <name>
+synctr sync <name> [--dry-run]
+synctr watch <name> [--debounce-ms 1500]
+synctr schedule generate <name> [--kind systemd|launchd] [--interval SECS] [--bin PATH]
+synctr schedule install <name> [--kind systemd|launchd] [--interval SECS] [--bin PATH] [--dir DIR]
+synctr schedule uninstall <name> [--kind systemd|launchd] [--dir DIR]
 synctr which-rclone [--profile NAME]
-synctr status
+synctr status [--json]
 synctr tui
 ```
 
-`--json` on `status`, `which-rclone`, and `profile list` prints structs a later Luau widget can `runAsync`. `--rclone PATH` overrides discovery. `--config-dir DIR` overrides XDG. `which-rclone --profile NAME` uses that profile's `rclone` field.
+`--json` on `status`, `which-rclone`, `profile list`, and `schedule generate` prints structs. The bar/plugin contract is `synctr status --json` only. Do not add a second status format. `--rclone PATH` overrides discovery. `--config-dir DIR` overrides XDG. `which-rclone --profile NAME` uses that profile's `rclone` field.
 
-`synctr tui`: left pane is profiles, right is last run / rclone path / state, bottom is the rclone log. Enter starts or stops the selected profile through the engine. `q` quits.
+`synctr sync --dry-run` uses the same argv path as a real run and appends rclone `--dry-run`. rclone writes nothing. Last-run is still recorded.
+
+`synctr watch` is opt-in. It is not a daemon and the TUI still starts jobs with Enter. Changes under the profile's local directory debounce, then call the same `run_sync` path. Ignored paths (node_modules, .git, …) do not wake it.
+
+`synctr schedule install` writes a systemd user unit+timer or a launchd plist. It does not enable, load, or start anything. `generate` prints the files. Tests assert contents; CI never talks to systemd or launchd.
+
+`synctr tui`: left pane is profiles, right is last run / rclone path / state, bottom is the rclone log. Enter starts or stops the selected profile. `d` dry-runs. `j`/`k` move. `pgup`/`pgdn` scroll the log. `r` reloads profiles from disk. `?` help. `q` quits.
 
 ## Ignore
 
@@ -56,7 +73,7 @@ One resolver, this order:
 
 GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway. `synctr which-rclone` prints the path and why. Pass `--profile NAME` to apply that profile's override.
 
-`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, and `--use-json-log`, then the profile's extra flags. Exit status is rclone's.
+`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, and `--use-json-log`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's.
 
 ## Config
 
@@ -71,6 +88,40 @@ GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are sear
 
 Profile fields: `name`, `local`, `remote`, `mode`, optional `rclone`, `extra_flags`, `extra_ignore`.
 
+`profile edit` rewrites the existing toml. `profile rename` moves the toml, ignore file, and last-run file together. It does not delete and recreate.
+
+## status --json
+
+The Noctalia plugin (`contrib/noctalia/synctr`) and any later menu bar extra read this object and nothing else:
+
+```
+{
+  "rclone": { "found": true, "path": "...", "source": "PATH", "detail": "..." },
+  "profiles": [
+    {
+      "name": "docs",
+      "local": "/home/luxus/docs",
+      "remote": "remote:path",
+      "mode": "sync",
+      "extra_flags": [],
+      "extra_ignore": [],
+      "last_run": {
+        "finished_at_unix": 0,
+        "finished_at": "1970-01-01T00:00:00Z",
+        "exit_code": 0,
+        "ok": true
+      }
+    }
+  ]
+}
+```
+
+`last_run` is omitted when the profile has never run. `rclone.path` / `source` / `detail` are omitted when rclone is missing.
+
+Point a Noctalia path source at `contrib/noctalia/synctr`. This tree cannot run Noctalia, so the plugin is shipped with a test that the fields it reads are the fields `status --json` emits.
+
+A macOS menu bar extra is not in this crate. See `contrib/menubar/`.
+
 ## Build
 
 ```
@@ -79,6 +130,8 @@ cargo build -p synctr
 nix build
 nix run
 ```
+
+GitHub Actions: `cargo test --workspace --locked` on every PR and push to `main`. Release binaries on `main`, `v*` tags, and `workflow_dispatch` for `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and `x86_64-apple-darwin`, named `synctr-<version>-<target>`. No aarch64-linux, notarization, or brew tap.
 
 Flake outputs, each of `aarch64-darwin`, `x86_64-darwin`, `x86_64-linux`, `aarch64-linux`:
 
