@@ -9,4 +9,10 @@ if [ -n "${SYNCTR_STUB_LOG:-}" ]; then
     printf '\n'
   } >> "$SYNCTR_STUB_LOG"
 fi
+if [ -n "${SYNCTR_STUB_STDERR:-}" ]; then
+  printf '%s\n' "$SYNCTR_STUB_STDERR" >&2
+fi
+if [ -n "${SYNCTR_STUB_SLEEP:-}" ]; then
+  sleep "$SYNCTR_STUB_SLEEP"
+fi
 exit "${SYNCTR_STUB_EXIT:-0}"

@@ -1,13 +1,16 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ignore::load_filters;
 use crate::lock::{try_lock_profile, ProfileLock};
 use crate::paths::Paths;
 use crate::profile::Profile;
+use crate::progress::ProgressSink;
 use crate::rclone::{resolve_rclone_live, ResolvedRclone};
 use crate::status::{write_last_run, LastRun};
 
@@ -54,6 +57,8 @@ pub fn build_sync_argv(
         filter_file.as_os_str().to_os_string(),
         "--verbose".into(),
         "--use-json-log".into(),
+        "--stats".into(),
+        "1s".into(),
     ];
     for flag in &profile.extra_flags {
         args.push(flag.into());
@@ -80,6 +85,7 @@ pub fn prepare_filter_file(paths: &Paths, profile: &Profile) -> Result<PathBuf> 
 #[derive(Debug)]
 pub struct SyncChild {
     pub child: Child,
+    pub progress: ProgressSink,
     _lock: ProfileLock,
 }
 
@@ -109,8 +115,19 @@ pub fn spawn_sync(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let progress = match ProgressSink::start(paths, &profile.name, pid, dry_run) {
+        Ok(progress) => progress,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     Ok(SyncChild {
-        child: cmd.spawn()?,
+        child,
+        progress,
         _lock,
     })
 }
@@ -133,34 +150,88 @@ pub fn execute_sync(
     inherit_stdio: bool,
     dry_run: bool,
 ) -> Result<SyncOutcome> {
-    let _lock = try_lock_profile(paths, &profile.name)?;
-    let filter = prepare_filter_file(paths, profile)?;
-    let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
-    let mut cmd = argv.command();
-    if inherit_stdio {
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        let status = cmd.status()?;
-        let exit_code = status.code().unwrap_or(1);
-        write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
-        Ok(SyncOutcome {
-            exit_code,
-            rclone: resolved,
-            stdout: None,
-            stderr: None,
-        })
+    let mut spawned = spawn_sync(paths, profile, &resolved, dry_run)?;
+    let (stdout, stderr) = drain_rclone(&mut spawned, inherit_stdio)?;
+    let status = spawned.child.wait()?;
+    let exit_code = status.code().unwrap_or(1);
+    drop(spawned);
+    write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
+    Ok(SyncOutcome {
+        exit_code,
+        rclone: resolved,
+        stdout,
+        stderr,
+    })
+}
+
+fn drain_rclone(
+    spawned: &mut SyncChild,
+    inherit: bool,
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    let stdout = spawned.child.stdout.take();
+    let stderr = spawned.child.stderr.take();
+    let out_h = stdout.map(|r| {
+        let progress = spawned.progress.clone();
+        thread::spawn(move || pump_pipe(r, progress, inherit, false))
+    });
+    let err_h = stderr.map(|r| {
+        let progress = spawned.progress.clone();
+        thread::spawn(move || pump_pipe(r, progress, inherit, true))
+    });
+    let stdout_buf = match out_h {
+        Some(h) => Some(join_pipe(h)?),
+        None => None,
+    };
+    let stderr_buf = match err_h {
+        Some(h) => Some(join_pipe(h)?),
+        None => None,
+    };
+    if inherit {
+        Ok((None, None))
     } else {
-        let output = cmd.output()?;
-        let exit_code = output.status.code().unwrap_or(1);
-        write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
-        Ok(SyncOutcome {
-            exit_code,
-            rclone: resolved,
-            stdout: Some(output.stdout),
-            stderr: Some(output.stderr),
-        })
+        Ok((stdout_buf, stderr_buf))
     }
+}
+
+fn join_pipe(h: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>> {
+    h.join()
+        .map_err(|_| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "rclone pipe thread panicked",
+            ))
+        })?
+        .map_err(Error::from)
+}
+
+fn pump_pipe<R: Read>(
+    reader: R,
+    progress: ProgressSink,
+    inherit: bool,
+    is_err: bool,
+) -> io::Result<Vec<u8>> {
+    let mut buf = BufReader::new(reader);
+    let mut collected = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = buf.read_line(&mut line)?;
+        if n == 0 {
+            break;
+        }
+        progress.push_line(line.trim_end_matches(['\n', '\r']));
+        if inherit {
+            if is_err {
+                eprint!("{line}");
+                let _ = io::stderr().flush();
+            } else {
+                print!("{line}");
+                let _ = io::stdout().flush();
+            }
+        }
+        collected.extend_from_slice(line.as_bytes());
+    }
+    Ok(collected)
 }
 
 #[cfg(test)]
@@ -200,6 +271,8 @@ mod tests {
                 "/tmp/docs.filter",
                 "--verbose",
                 "--use-json-log",
+                "--stats",
+                "1s",
                 "--checksum",
             ]
         );
@@ -280,6 +353,78 @@ mod tests {
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());
+    }
+
+    #[test]
+    fn spawn_sync_parses_json_log_into_live_progress() {
+        let (root, paths) = scratch("runner-progress");
+        let bin = write_exec(
+            &root,
+            "rclone",
+            r#"#!/bin/sh
+echo '{"level":"info","msg":"Transferred","stats":{"bytes":100,"totalBytes":400,"speed":50,"eta":6,"transfers":1,"totalTransfers":4,"transferring":[{"name":"a.bin","percentage":25}]}}' >&2
+while true; do sleep 1; done
+"#,
+        );
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:x".into(),
+            Mode::Copy,
+            Some(bin.clone()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let mut child = spawn_sync(
+            &paths,
+            &profile,
+            &ResolvedRclone {
+                path: bin,
+                source: ResolveSource::Profile,
+            },
+            false,
+        )
+        .unwrap();
+        if let Some(err) = child.stderr.take() {
+            let progress = child.progress.clone();
+            std::thread::spawn(move || {
+                let mut buf = std::io::BufReader::new(err);
+                let mut line = String::new();
+                while std::io::BufRead::read_line(&mut buf, &mut line).unwrap_or(0) > 0 {
+                    progress.push_line(line.trim_end_matches(['\n', '\r']));
+                    line.clear();
+                }
+            });
+        }
+        let start = std::time::Instant::now();
+        let mut seen = None;
+        while start.elapsed() < std::time::Duration::from_secs(2) {
+            if let Some(p) = crate::progress::live_progress(&paths, "docs") {
+                if p.bytes == 100 {
+                    seen = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let snap =
+            crate::status::status_snapshot(&store, Some(&profile.rclone.clone().unwrap()), None)
+                .unwrap();
+        child.kill().unwrap();
+        let _ = child.wait();
+        drop(child);
+        let p = seen.expect("live progress from rclone json log");
+        assert_eq!(p.total_bytes, 400);
+        assert_eq!(p.percent, Some(25));
+        assert_eq!(p.file.as_deref(), Some("a.bin"));
+        assert_eq!(
+            snap.profiles[0].progress.as_ref().map(|x| x.bytes),
+            Some(100)
+        );
+        assert!(crate::progress::live_progress(&paths, "docs").is_none());
     }
 
     #[test]
