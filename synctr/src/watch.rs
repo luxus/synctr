@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use notify::{event::ModifyKind, Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use synctr_engine::{
-    load_filters, path_should_wake, run_sync, Debouncer, Error, ProfileStore, Result,
+    load_filters, path_should_wake, resolve_rclone_live, run_sync, Debouncer, Error, ProfileStore,
+    Result,
 };
 
 pub fn run(
@@ -27,6 +28,7 @@ pub fn run(
         .local
         .canonicalize()
         .unwrap_or_else(|_| profile.local.clone());
+    resolve_rclone_live(rclone_flag, profile.rclone.as_deref())?;
     let filters = load_filters(store.paths(), &profile)?;
     let (tx, rx) = mpsc::channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())
@@ -66,9 +68,13 @@ pub fn run(
         }
         if debounce.take_ready(Instant::now()) {
             eprintln!("change detected, syncing {name}");
-            let outcome = run_sync(store.paths(), &profile, rclone_flag, true, false)?;
-            if outcome.exit_code != 0 {
-                eprintln!("{name} exit {}", outcome.exit_code);
+            match run_sync(store.paths(), &profile, rclone_flag, true, false) {
+                Ok(outcome) => {
+                    if outcome.exit_code != 0 {
+                        eprintln!("{name} exit {}", outcome.exit_code);
+                    }
+                }
+                Err(e) => eprintln!("{name}: {e}"),
             }
         }
     }

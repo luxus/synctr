@@ -838,3 +838,36 @@ fn watch_does_not_sync_on_ignored_node_modules() {
         fs::read_to_string(&err_path).unwrap_or_default()
     );
 }
+
+#[test]
+fn watch_preflights_rclone_before_printing_watching() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    add_docs(&root, &local, None);
+    let missing = root.join("no-such-rclone");
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            missing.to_str().unwrap(),
+            "watch",
+            "docs",
+            "--debounce-ms",
+            "50",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    let combined = format!("{err}{}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        err.contains("rclone override not found") || err.contains("not found"),
+        "stderr={err}"
+    );
+    assert!(
+        !combined.contains("watching "),
+        "must fail before the watching banner; out={combined}"
+    );
+}
