@@ -234,7 +234,10 @@ pub fn read_last_run(paths: &Paths, name: &str) -> Result<Option<LastRun>> {
     if !path.is_file() {
         return Ok(None);
     }
-    Ok(Some(toml::from_str(&fs::read_to_string(path)?)?))
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    Ok(toml::from_str(&text).ok())
 }
 
 fn unix_to_rfc3339(secs: i64) -> String {
@@ -411,5 +414,34 @@ mod tests {
         assert!(json.source.is_none());
         assert!(json.detail.is_none());
         assert_eq!(json.human_line(), "not found");
+    }
+
+    #[test]
+    fn snapshot_skips_corrupt_last_run_and_keeps_good_profiles() {
+        let (root, paths) = scratch("status-skip-corrupt");
+        let bin = write_exec(&root, "rclone", "#!/bin/sh\nexit 0\n");
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        crate::status::write_last_run(&paths, "docs", LastRun::now(0)).unwrap();
+        fs::write(paths.last_run("docs"), "not a last-run table {{{").unwrap();
+        fs::write(paths.profile_toml("zzz-bad"), "nope").unwrap();
+        let snap = status_snapshot(&store, Some(&bin), None).unwrap();
+        assert_eq!(snap.profiles.len(), 1);
+        assert_eq!(snap.profiles[0].name, "docs");
+        assert!(snap.profiles[0].last_run.is_none());
+        let json = status_json(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_status_json_contract(&v);
+        assert!(v["profiles"][0].get("last_run").is_none());
     }
 }
