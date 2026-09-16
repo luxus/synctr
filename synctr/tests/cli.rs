@@ -478,6 +478,34 @@ fn status_json_survives_missing_rclone_override() {
 }
 
 #[test]
+fn status_json_skips_bad_profile_toml_and_corrupt_last_run() {
+    let root = scratch();
+    add_docs(&root, Path::new("/tmp/docs"), None);
+    fs::write(root.join("profiles/zzz-bad.toml"), "this is not toml {{{").unwrap();
+    fs::create_dir_all(root.join("state/runs")).unwrap();
+    fs::write(root.join("state/runs/docs.toml"), "not a last-run {{{").unwrap();
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_status_json_contract(&v);
+    assert_eq!(v["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(v["profiles"][0]["name"], "docs");
+    assert!(v["profiles"][0].get("last_run").is_none());
+}
+
+#[test]
 fn status_json_matches_noctalia_plugin_fields() {
     let root = scratch();
     add_docs(&root, Path::new("/tmp/docs"), None);

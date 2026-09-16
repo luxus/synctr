@@ -150,7 +150,10 @@ impl ProfileStore {
             .collect();
         entries.sort();
         for path in entries {
-            out.push(load_file(&path)?);
+            match load_file(&path) {
+                Ok(profile) => out.push(profile),
+                Err(_) => continue,
+            }
         }
         Ok(out)
     }
@@ -395,5 +398,26 @@ mod tests {
         assert_eq!(p.local, cwd.join("docs"));
         assert_eq!(p.rclone.as_deref(), Some(cwd.join("bin/rclone").as_path()));
         assert!(p.local.is_absolute());
+    }
+
+    #[test]
+    fn list_skips_unreadable_toml_so_other_profiles_remain() {
+        let (_root, paths) = scratch("profile-skip-bad");
+        let store = ProfileStore::new(paths.clone());
+        let p = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&p).unwrap();
+        fs::write(paths.profile_toml("zzz-bad"), "this is not toml {{{").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "docs");
     }
 }
