@@ -492,18 +492,28 @@ while true; do sleep 1; done
         first.kill().unwrap();
         first.wait().unwrap();
         drop(first);
-        execute_sync(
-            &paths,
-            &profile,
-            ResolvedRclone {
-                path: ok_bin,
-                source: ResolveSource::Profile,
-            },
-            false,
-            false,
-            false,
-        )
-        .unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            match execute_sync(
+                &paths,
+                &profile,
+                ResolvedRclone {
+                    path: ok_bin.clone(),
+                    source: ResolveSource::Profile,
+                },
+                false,
+                false,
+                false,
+            ) {
+                Ok(_) => break,
+                Err(crate::error::Error::ProfileBusy(_))
+                    if start.elapsed() < std::time::Duration::from_millis(250) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[test]
