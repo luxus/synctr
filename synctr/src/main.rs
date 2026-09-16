@@ -131,6 +131,10 @@ enum ProfileCmd {
     Rename { old: String, new: String },
     /// Delete a profile
     Remove { name: String },
+    /// Allow sync / watch / TUI / schedule generate for this profile
+    Enable { name: String },
+    /// Refuse sync / watch / TUI Enter until enabled again
+    Disable { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -212,6 +216,7 @@ fn try_main() -> synctr_engine::Result<ExitCode> {
         }
         Command::Sync { name, dry_run } => {
             let profile = store.get(&name)?;
+            profile.require_enabled()?;
             let outcome = synctr_engine::run_sync(
                 store.paths(),
                 &profile,
@@ -230,7 +235,7 @@ fn try_main() -> synctr_engine::Result<ExitCode> {
                 .config_dir
                 .as_ref()
                 .map(|_| store.paths().config_dir.clone());
-            schedule_cmd(cli.json, baked_config.as_deref(), command)?;
+            schedule_cmd(&store, cli.json, baked_config.as_deref(), command)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::WhichRclone { profile } => {
@@ -283,13 +288,23 @@ fn profile_cmd(store: &ProfileStore, json: bool, cmd: ProfileCmd) -> synctr_engi
                 println!("no profiles");
             } else {
                 for p in profiles {
-                    println!(
-                        "{}\t{}\t{}\t->\t{}",
-                        p.name,
-                        p.mode,
-                        p.local.display(),
-                        p.remote
-                    );
+                    if p.enabled {
+                        println!(
+                            "{}\t{}\t{}\t->\t{}",
+                            p.name,
+                            p.mode,
+                            p.local.display(),
+                            p.remote
+                        );
+                    } else {
+                        println!(
+                            "{}\t{}\t{}\t->\t{}\tdisabled",
+                            p.name,
+                            p.mode,
+                            p.local.display(),
+                            p.remote
+                        );
+                    }
                 }
             }
         }
@@ -336,6 +351,7 @@ fn profile_cmd(store: &ProfileStore, json: bool, cmd: ProfileCmd) -> synctr_engi
                 } else {
                     Some(extra_ignore)
                 },
+                enabled: None,
             };
             let profile = store.edit(&name, edit)?;
             if json {
@@ -360,6 +376,22 @@ fn profile_cmd(store: &ProfileStore, json: bool, cmd: ProfileCmd) -> synctr_engi
                 println!("removed {name}");
             }
         }
+        ProfileCmd::Enable { name } => {
+            let profile = store.set_enabled(&name, true)?;
+            if json {
+                print_json(&profile)?;
+            } else {
+                println!("enabled {}", profile.name);
+            }
+        }
+        ProfileCmd::Disable { name } => {
+            let profile = store.set_enabled(&name, false)?;
+            if json {
+                print_json(&profile)?;
+            } else {
+                println!("disabled {}", profile.name);
+            }
+        }
     }
     Ok(())
 }
@@ -378,7 +410,15 @@ fn synctr_bin(bin: Option<PathBuf>) -> synctr_engine::Result<PathBuf> {
     }
 }
 
+fn require_enabled_if_present(store: &ProfileStore, name: &str) -> synctr_engine::Result<()> {
+    if let Ok(profile) = store.get(name) {
+        profile.require_enabled()?;
+    }
+    Ok(())
+}
+
 fn schedule_cmd(
+    store: &ProfileStore,
     json: bool,
     config_dir: Option<&std::path::Path>,
     cmd: ScheduleCmd,
@@ -390,6 +430,7 @@ fn schedule_cmd(
             interval,
             bin,
         } => {
+            require_enabled_if_present(store, &name)?;
             let spec = generate_schedule(
                 schedule_kind(kind)?,
                 &name,
@@ -416,6 +457,7 @@ fn schedule_cmd(
             bin,
             dir,
         } => {
+            require_enabled_if_present(store, &name)?;
             let kind = schedule_kind(kind)?;
             let spec = generate_schedule(kind, &name, &synctr_bin(bin)?, interval, config_dir)?;
             let used_default = dir.is_none();
@@ -512,14 +554,25 @@ fn status_cmd(
             Some(xfer) => format!("running {}", xfer.summary()),
             None => last_run_short(p.last_run.as_ref()),
         };
-        println!(
-            "{}\t{}\t{}\t->\t{}\t{}",
-            p.name,
-            p.mode,
-            p.local.display(),
-            p.remote,
-            last
-        );
+        if p.enabled {
+            println!(
+                "{}\t{}\t{}\t->\t{}\t{}",
+                p.name,
+                p.mode,
+                p.local.display(),
+                p.remote,
+                last
+            );
+        } else {
+            println!(
+                "{}\t{}\t{}\t->\t{}\t{}\tdisabled",
+                p.name,
+                p.mode,
+                p.local.display(),
+                p.remote,
+                last
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

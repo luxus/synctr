@@ -27,6 +27,8 @@ pub enum Error {
     HomeNotFound,
     #[error("profile `{0}` is already running")]
     ProfileBusy(String),
+    #[error("profile `{0}` is disabled (synctr profile enable {0})")]
+    ProfileDisabled(String),
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("toml: {0}")]

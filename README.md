@@ -116,7 +116,7 @@ synctr status --json
 }
 ```
 
-`last_run` is omitted when the profile has never run. `rclone.path` / `source` / `detail` are omitted when rclone is missing.
+`last_run` is omitted when the profile has never run. `rclone.path` / `source` / `detail` are omitted when rclone is missing. `enabled` is omitted when true (the default). A parked profile still appears and emits `"enabled": false`.
 
 While rclone is transferring, each profile may also include additive `progress` (omitted when idle). Do not remove or rename the Noctalia fields above. `progress` is present only while a synctr rclone child holds that profile's lock:
 
@@ -153,6 +153,8 @@ synctr profile edit <name> [--local PATH] [--remote remote:path] [--mode copy|sy
                              [--ignore PATTERN ...] [--clear-ignore]
 synctr profile rename <old> <new>
 synctr profile remove <name>
+synctr profile enable <name>
+synctr profile disable <name>
 synctr watch <name> [--debounce-ms 1500]
 synctr schedule generate <name> [--kind systemd|launchd] [--interval SECS] [--bin PATH]
 synctr schedule install <name> [--kind systemd|launchd] [--interval SECS] [--bin PATH] [--dir DIR]
@@ -167,6 +169,8 @@ synctr test-remote <name> [--timeout SECS]
 `doctor` prints rclone (path + `rclone version`), config/state dirs, and each profile's local-exists / lock / last-run. Exit 1 if rclone is missing or any profile's local path is gone. It does not start a sync and does not take the per-profile flock.
 
 `test-remote` runs `rclone lsd <remote>` with a hard timeout (default 3s) and does not sync. The remote must already exist.
+
+Disabled profiles stay on disk and in `status --json`. `sync`, `watch`, TUI Enter, and `schedule generate|install` refuse them until `profile enable`. `schedule uninstall` is still name-only.
 
 `watch` is opt-in. Changes under the profile's local directory debounce, then run the same sync path. Ignored paths do not wake it. Ctrl-C stops it. It is not a login daemon.
 
@@ -218,7 +222,7 @@ GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are sear
 ~/.local/state/synctr/runs/<name>.toml
 ```
 
-Profile fields: `name`, `local`, `remote`, `mode`, optional `rclone`, `extra_flags`, `extra_ignore`.
+Profile fields: `name`, `local`, `remote`, `mode`, optional `rclone`, `extra_flags`, `extra_ignore`, optional `enabled` (default true; omitted from the toml when true).
 
 ## What 0.1.0 does not do
 

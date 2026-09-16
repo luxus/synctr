@@ -108,6 +108,7 @@ pub fn spawn_sync(
     resolved: &ResolvedRclone,
     dry_run: bool,
 ) -> Result<SyncChild> {
+    profile.require_enabled()?;
     let _lock = try_lock_profile(paths, &profile.name)?;
     let filter = prepare_filter_file(paths, profile)?;
     let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
@@ -484,5 +485,36 @@ while true; do sleep 1; done
             false,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn spawn_sync_refuses_disabled_profile() {
+        let (root, paths) = scratch("runner-disabled");
+        let bin = write_exec(&root, "rclone", "#!/bin/sh\nexit 0\n");
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:x".into(),
+            Mode::Copy,
+            Some(bin.clone()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let disabled = store.set_enabled("docs", false).unwrap();
+        let err = spawn_sync(
+            &paths,
+            &disabled,
+            &ResolvedRclone {
+                path: bin,
+                source: ResolveSource::Profile,
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::error::Error::ProfileDisabled(name) if name == "docs"));
+        assert!(!crate::lock::profile_is_busy(&paths, "docs"));
     }
 }
