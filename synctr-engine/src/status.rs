@@ -136,6 +136,20 @@ pub struct ProfileStatus {
     pub last_run: Option<LastRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<TransferProgress>,
+    /// Omitted when true (default) so idle Noctalia JSON stays unchanged.
+    #[serde(
+        default = "enabled_default",
+        skip_serializing_if = "enabled_default_skip"
+    )]
+    pub enabled: bool,
+}
+
+fn enabled_default() -> bool {
+    true
+}
+
+fn enabled_default_skip(b: &bool) -> bool {
+    *b
 }
 
 impl ProfileStatus {
@@ -152,6 +166,7 @@ impl ProfileStatus {
             extra_ignore: profile.extra_ignore,
             last_run,
             progress,
+            enabled: profile.enabled,
         })
     }
 }
@@ -342,6 +357,7 @@ mod tests {
                 extra_ignore: vec!["*.key".into()],
                 last_run: None,
                 progress: None,
+                enabled: true,
             }],
         };
         let json = status_json(&snap).unwrap();
@@ -356,6 +372,33 @@ mod tests {
         assert!(v["profiles"][0].get("last_run").is_none());
         assert!(v["profiles"][0].get("progress").is_none());
         assert!(v["profiles"][0].get("rclone").is_none());
+        assert!(v["profiles"][0].get("enabled").is_none());
+        let round: StatusSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, snap);
+    }
+
+    #[test]
+    fn status_json_includes_enabled_false_when_disabled() {
+        let snap = StatusSnapshot {
+            rclone: RcloneJson::missing(),
+            profiles: vec![ProfileStatus {
+                name: "docs".into(),
+                local: PathBuf::from("/tmp/docs"),
+                remote: "b2:bucket/docs".into(),
+                mode: Mode::Sync,
+                rclone: None,
+                extra_flags: vec![],
+                extra_ignore: vec![],
+                last_run: None,
+                progress: None,
+                enabled: false,
+            }],
+        };
+        let json = status_json(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_status_json_contract(&v);
+        assert_eq!(v["profiles"][0]["enabled"], false);
+        assert!(v["profiles"][0].get("last_run").is_none());
         let round: StatusSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(round, snap);
     }
@@ -384,6 +427,7 @@ mod tests {
                     ok: true,
                 }),
                 progress: None,
+                enabled: true,
             }],
         };
         let json = status_json(&snap).unwrap();

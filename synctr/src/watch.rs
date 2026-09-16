@@ -16,6 +16,7 @@ pub fn run(
     debounce_ms: u64,
 ) -> Result<()> {
     let profile = store.get(name)?;
+    profile.require_enabled()?;
     if !profile.local.is_dir() {
         return Err(Error::Io(io::Error::new(
             io::ErrorKind::NotFound,

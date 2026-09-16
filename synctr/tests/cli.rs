@@ -222,6 +222,187 @@ fn profile_add_list_show_remove_and_json() {
 }
 
 #[test]
+fn profile_disable_blocks_sync_watch_and_schedule() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let fake = stub_rclone(&root);
+    add_docs(&root, &local, Some(&fake));
+
+    let disable = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "disable",
+            "docs",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        disable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disable.stderr)
+    );
+    assert!(String::from_utf8_lossy(&disable.stdout).contains("disabled docs"));
+
+    let list = isolated(&root)
+        .args(["--config-dir", root.to_str().unwrap(), "profile", "list"])
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(listed.contains("disabled"), "list={listed}");
+
+    let listed_json = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "profile",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&listed_json.stdout).unwrap();
+    assert_eq!(v["profiles"][0]["enabled"], false);
+
+    let status = isolated(&root)
+        .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_status_json_contract(&v);
+    assert_eq!(v["profiles"][0]["enabled"], false);
+    assert_eq!(v["profiles"][0]["name"], "docs");
+
+    let human = isolated(&root)
+        .args(["--config-dir", root.to_str().unwrap(), "status"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&human.stdout).contains("disabled"));
+
+    let log = root.join("stub.log");
+    let sync = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "docs",
+        ])
+        .output()
+        .unwrap();
+    assert!(!sync.status.success());
+    let err = String::from_utf8_lossy(&sync.stderr);
+    assert!(
+        err.contains("disabled"),
+        "sync must refuse a disabled profile; stderr={err}"
+    );
+    assert!(
+        !log.exists() || fs::read_to_string(&log).unwrap().trim().is_empty(),
+        "rclone must not start for a disabled profile"
+    );
+
+    let watch = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "watch",
+            "docs",
+            "--debounce-ms",
+            "50",
+        ])
+        .output()
+        .unwrap();
+    assert!(!watch.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&watch.stderr),
+        String::from_utf8_lossy(&watch.stdout)
+    );
+    assert!(combined.contains("disabled"));
+    assert!(
+        !combined.contains("watching "),
+        "must fail before the watching banner; out={combined}"
+    );
+
+    let gen = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "schedule",
+            "generate",
+            "docs",
+            "--kind",
+            "systemd",
+            "--bin",
+            "/opt/synctr/bin/synctr",
+        ])
+        .output()
+        .unwrap();
+    assert!(!gen.status.success());
+    assert!(String::from_utf8_lossy(&gen.stderr).contains("disabled"));
+
+    let enable = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "profile",
+            "enable",
+            "docs",
+        ])
+        .output()
+        .unwrap();
+    assert!(enable.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&enable.stdout).unwrap();
+    assert!(v.get("enabled").is_none() || v["enabled"] == true);
+
+    let status = isolated(&root)
+        .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_status_json_contract(&v);
+    assert!(v["profiles"][0].get("enabled").is_none());
+
+    let sync = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "docs",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+}
+
+#[test]
+fn profile_help_lists_enable_and_disable() {
+    let out = bin().args(["profile", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("enable"));
+    assert!(text.contains("disable"));
+}
+
+#[test]
 fn which_rclone_json_with_explicit_binary() {
     let root = scratch();
     let fake = stub_rclone(&root);

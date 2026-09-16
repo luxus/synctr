@@ -217,6 +217,13 @@ fn toggle_selected(
         .find(|r| r.profile.name == name)
         .map(|r| r.profile.clone())
         .expect("selected profile");
+    if !profile.enabled {
+        push_log(
+            &ui.log,
+            format!("profile {name} is disabled (synctr profile enable {name})"),
+        );
+        return Ok(());
+    }
     let resolved = resolve_rclone_live(rclone_flag, profile.rclone.as_deref())?;
     start_profile(ui, store.paths(), &profile, resolved, dry_run)
 }
@@ -337,7 +344,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>,
         .iter()
         .map(|row| {
             let mark = running_mark(ui, paths, &row.profile.name);
-            ListItem::new(format!("{}{mark}", row.profile.name))
+            let disabled = if row.profile.enabled { "" } else { " disabled" };
+            ListItem::new(format!("{}{disabled}{mark}", row.profile.name))
         })
         .collect();
     frame.render_stateful_widget(
@@ -377,6 +385,7 @@ fn help_pane() -> Paragraph<'static> {
         Line::from("q / esc   quit"),
         Line::from(""),
         Line::from("one rclone child at a time. Enter on another profile stops the current one."),
+        Line::from("disabled profiles log an error on Enter; they do not start rclone."),
         Line::from("state pane shows live rclone transfer progress (bytes, %, ETA, file)."),
         Line::from("directory watch is `synctr watch`, not this TUI."),
     ];
@@ -435,6 +444,8 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>, paths: &Paths) -> Paragraph<
     let xfer = live_progress(paths, &p.name);
     let state = if xfer.is_some() || is_running(ui, &p.name) {
         "running"
+    } else if !p.enabled {
+        "disabled"
     } else {
         "idle"
     };

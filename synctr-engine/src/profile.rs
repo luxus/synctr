@@ -56,6 +56,17 @@ pub struct Profile {
     pub extra_flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_ignore: Vec<String>,
+    /// Omitted when true so existing tomls and idle `status --json` stay unchanged.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,6 +77,7 @@ pub struct ProfileEdit {
     pub rclone: Option<Option<PathBuf>>,
     pub extra_flags: Option<Vec<String>>,
     pub extra_ignore: Option<Vec<String>>,
+    pub enabled: Option<bool>,
 }
 
 impl ProfileEdit {
@@ -76,6 +88,7 @@ impl ProfileEdit {
             && self.rclone.is_none()
             && self.extra_flags.is_none()
             && self.extra_ignore.is_none()
+            && self.enabled.is_none()
     }
 }
 
@@ -103,7 +116,16 @@ impl Profile {
             rclone,
             extra_flags,
             extra_ignore,
+            enabled: true,
         })
+    }
+
+    pub fn require_enabled(&self) -> Result<()> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(Error::ProfileDisabled(self.name.clone()))
+        }
     }
 }
 
@@ -205,9 +227,22 @@ impl ProfileStore {
         if let Some(extra_ignore) = edit.extra_ignore {
             profile.extra_ignore = extra_ignore;
         }
+        if let Some(enabled) = edit.enabled {
+            profile.enabled = enabled;
+        }
         let dest = self.paths.profile_toml(name);
         fs::write(dest, toml::to_string_pretty(&profile)?)?;
         Ok(profile)
+    }
+
+    pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<Profile> {
+        self.edit(
+            name,
+            ProfileEdit {
+                enabled: Some(enabled),
+                ..ProfileEdit::default()
+            },
+        )
     }
 
     pub fn rename(&self, old: &str, new: &str) -> Result<Profile> {
@@ -419,5 +454,40 @@ mod tests {
         let listed = store.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "docs");
+    }
+
+    #[test]
+    fn enabled_defaults_true_and_disable_roundtrips() {
+        let (_root, paths) = scratch("profile-enabled");
+        let store = ProfileStore::new(paths.clone());
+        let p = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&p).unwrap();
+        assert!(store.get("docs").unwrap().enabled);
+        let text = fs::read_to_string(paths.profile_toml("docs")).unwrap();
+        assert!(
+            !text.contains("enabled"),
+            "enabled=true should be omitted from toml: {text}"
+        );
+        fs::write(
+            paths.profile_toml("legacy"),
+            "name = \"legacy\"\nlocal = \"/tmp/x\"\nremote = \"b2:x\"\nmode = \"copy\"\n",
+        )
+        .unwrap();
+        assert!(store.get("legacy").unwrap().enabled);
+        let off = store.set_enabled("docs", false).unwrap();
+        assert!(!off.enabled);
+        assert!(!store.get("docs").unwrap().enabled);
+        off.require_enabled().unwrap_err();
+        store.set_enabled("docs", true).unwrap();
+        assert!(store.get("docs").unwrap().enabled);
     }
 }
