@@ -446,6 +446,38 @@ fn sync_dry_run_and_filter_from_use_stub_argv() {
 }
 
 #[test]
+fn status_json_survives_missing_rclone_override() {
+    let root = scratch();
+    add_docs(&root, Path::new("/tmp/docs"), None);
+    let missing = root.join("no-such-rclone");
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            missing.to_str().unwrap(),
+            "--json",
+            "status",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_status_json_contract(&v);
+    assert_eq!(v["rclone"]["found"], false);
+    assert!(v["rclone"].get("path").is_none());
+    assert!(v["rclone"].get("source").is_none());
+    assert!(v["rclone"].get("detail").is_none());
+    let parsed: StatusSnapshot = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed.profiles[0].name, "docs");
+    assert!(!parsed.rclone.found);
+}
+
+#[test]
 fn status_json_matches_noctalia_plugin_fields() {
     let root = scratch();
     add_docs(&root, Path::new("/tmp/docs"), None);

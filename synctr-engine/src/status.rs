@@ -107,7 +107,8 @@ impl RcloneJson {
     ) -> Result<Self> {
         match resolve_rclone_live(flag, profile_rclone) {
             Ok(r) => Ok(Self::from(&r)),
-            Err(crate::error::Error::RcloneNotFound) => Ok(Self::missing()),
+            Err(crate::error::Error::RcloneNotFound)
+            | Err(crate::error::Error::RcloneOverrideMissing { .. }) => Ok(Self::missing()),
             Err(e) => Err(e),
         }
     }
@@ -399,5 +400,16 @@ mod tests {
             snap.rclone.human_line(),
             format!("{} (--rclone)", bin.display())
         );
+    }
+
+    #[test]
+    fn from_live_missing_override_is_found_false() {
+        let missing = PathBuf::from("/no/such/rclone-for-status-json");
+        let json = RcloneJson::from_live(Some(&missing), None).unwrap();
+        assert!(!json.found);
+        assert!(json.path.is_none());
+        assert!(json.source.is_none());
+        assert!(json.detail.is_none());
+        assert_eq!(json.human_line(), "not found");
     }
 }
