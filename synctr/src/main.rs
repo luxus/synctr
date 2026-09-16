@@ -1,12 +1,13 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use synctr_engine::{
-    default_install_dir, enable_hint, generate_schedule, install_schedule, last_run_short,
-    make_absolute, status_snapshot, uninstall_schedule, write_status_json, Mode, Paths, Profile,
-    ProfileEdit, ProfileStore, RcloneJson, ScheduleKind,
+    default_install_dir, doctor_report, enable_hint, generate_schedule, install_schedule,
+    last_run_short, make_absolute, status_snapshot, test_remote, uninstall_schedule,
+    write_status_json, Mode, Paths, Profile, ProfileEdit, ProfileStore, RcloneJson, ScheduleKind,
 };
 
 mod tui;
@@ -69,6 +70,15 @@ enum Command {
     },
     /// Profiles, last run, and rclone path
     Status,
+    /// rclone, config, and per-profile health (does not start rclone sync)
+    Doctor,
+    /// Probe a profile's remote with rclone lsd (timeout, no sync)
+    TestRemote {
+        name: String,
+        /// Seconds before the probe is killed
+        #[arg(long, default_value_t = 3, value_name = "SECS")]
+        timeout: u64,
+    },
     /// Interactive profile list, state, and rclone log
     Tui,
 }
@@ -232,6 +242,10 @@ fn try_main() -> synctr_engine::Result<ExitCode> {
             which_rclone(&store, cli.rclone.as_deref(), cli.json, profile)
         }
         Command::Status => status_cmd(&store, cli.rclone.as_deref(), cli.json),
+        Command::Doctor => doctor_cmd(&store, cli.rclone.as_deref(), cli.json),
+        Command::TestRemote { name, timeout } => {
+            test_remote_cmd(&store, cli.rclone.as_deref(), cli.json, name, timeout)
+        }
         Command::Tui => {
             tui::run(&store, cli.rclone.as_deref())?;
             Ok(ExitCode::SUCCESS)
@@ -561,6 +575,49 @@ fn status_cmd(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn doctor_cmd(
+    store: &ProfileStore,
+    rclone_flag: Option<&std::path::Path>,
+    json: bool,
+) -> synctr_engine::Result<ExitCode> {
+    let report = doctor_report(store, rclone_flag)?;
+    if json {
+        print_json(&report)?;
+    } else {
+        report
+            .write_human(io::stdout().lock())
+            .map_err(synctr_engine::Error::from)?;
+    }
+    Ok(if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+fn test_remote_cmd(
+    store: &ProfileStore,
+    rclone_flag: Option<&std::path::Path>,
+    json: bool,
+    name: String,
+    timeout_secs: u64,
+) -> synctr_engine::Result<ExitCode> {
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let probe = test_remote(store, rclone_flag, &name, timeout)?;
+    if json {
+        print_json(&probe)?;
+    } else if probe.ok {
+        println!("ok\t{}\t{}\t{}", probe.name, probe.remote, probe.detail);
+    } else {
+        println!("fail\t{}\t{}\t{}", probe.name, probe.remote, probe.detail);
+    }
+    Ok(if probe.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn print_json(value: &impl serde::Serialize) -> synctr_engine::Result<()> {

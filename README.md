@@ -160,9 +160,15 @@ synctr schedule generate <name> [--kind systemd|launchd] [--interval SECS] [--bi
 synctr schedule install <name> [--kind systemd|launchd] [--interval SECS] [--bin PATH] [--dir DIR]
 synctr schedule uninstall <name> [--kind systemd|launchd] [--dir DIR]
 synctr which-rclone [--profile NAME]
+synctr doctor
+synctr test-remote <name> [--timeout SECS]
 ```
 
-`--json` also works on `which-rclone`, `profile list`, and `schedule generate`.
+`--json` also works on `which-rclone`, `profile list`, `schedule generate`, `doctor`, and `test-remote`.
+
+`doctor` prints rclone (path + `rclone version`), config/state dirs, and each profile's local-exists / lock / last-run. Exit 1 if rclone is missing or any profile's local path is gone. It does not start a sync and does not take the per-profile flock.
+
+`test-remote` runs `rclone lsd <remote>` with a hard timeout (default 3s) and does not sync. The remote must already exist.
 
 Disabled profiles stay on disk and in `status --json`. `sync`, `watch`, TUI Enter, and `schedule generate|install` refuse them until `profile enable`. `schedule uninstall` is still name-only.
 
