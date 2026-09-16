@@ -697,3 +697,75 @@ fn watch_runs_sync_after_temp_dir_change() {
     let args = parse_stub_line(fs::read_to_string(&log).unwrap().lines().next().unwrap());
     assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false);
 }
+
+#[test]
+fn watch_does_not_sync_on_ignored_node_modules() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(local.join("node_modules/pkg")).unwrap();
+    let fake = stub_rclone(&root);
+    add_docs(&root, &local, Some(&fake));
+    let log = root.join("stub.log");
+
+    let err_path = root.join("watch.err");
+    let err_file = fs::File::create(&err_path).unwrap();
+    let child = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "watch",
+            "docs",
+            "--debounce-ms",
+            "150",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err_file))
+        .spawn()
+        .unwrap();
+
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _guard = Kill(child);
+
+    std::thread::sleep(Duration::from_millis(200));
+    fs::write(local.join("node_modules/pkg/index.js"), "ignored\n").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let after_ignored = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        after_ignored.trim().is_empty(),
+        "ignored node_modules write woke watch; log={:?} stderr={}",
+        after_ignored,
+        fs::read_to_string(&err_path).unwrap_or_default()
+    );
+
+    fs::write(local.join("note.txt"), "hello\n").unwrap();
+    let start = Instant::now();
+    let mut woke = false;
+    while start.elapsed() < Duration::from_secs(4) {
+        if let Ok(text) = fs::read_to_string(&log) {
+            if text
+                .lines()
+                .any(|l| parse_stub_line(l).get(1).map(String::as_str) == Some("sync"))
+            {
+                woke = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        woke,
+        "watch should still sync a non-ignored file; log={:?} stderr={}",
+        fs::read_to_string(&log).ok(),
+        fs::read_to_string(&err_path).unwrap_or_default()
+    );
+}
