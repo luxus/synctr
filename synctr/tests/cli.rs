@@ -633,6 +633,75 @@ fn schedule_generate_and_install_do_not_start_anything() {
 }
 
 #[test]
+fn schedule_generate_bakes_absolute_config_dir() {
+    let root = scratch();
+    let cfg = root.join("cfg");
+    fs::create_dir_all(&cfg).unwrap();
+
+    let gen = isolated(&root)
+        .args([
+            "--config-dir",
+            cfg.to_str().unwrap(),
+            "--json",
+            "schedule",
+            "generate",
+            "docs",
+            "--kind",
+            "systemd",
+            "--bin",
+            "/opt/synctr/bin/synctr",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        gen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gen.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&gen.stdout).unwrap();
+    let service = v["files"][0]["body"].as_str().unwrap();
+    let expected = format!(
+        "ExecStart=/opt/synctr/bin/synctr --config-dir {} sync docs",
+        cfg.display()
+    );
+    assert!(
+        service.contains(&expected),
+        "systemd unit must bake --config-dir so the timer finds profiles; got {service}"
+    );
+
+    let rel = isolated(&root)
+        .current_dir(&root)
+        .args([
+            "--config-dir",
+            "rel-cfg",
+            "--json",
+            "schedule",
+            "generate",
+            "docs",
+            "--kind",
+            "launchd",
+            "--bin",
+            "bin/synctr",
+        ])
+        .output()
+        .unwrap();
+    assert!(rel.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&rel.stdout).unwrap();
+    let plist = v["files"][0]["body"].as_str().unwrap();
+    let abs_cfg = root.join("rel-cfg");
+    let abs_bin = root.join("bin/synctr");
+    assert!(
+        plist.contains(&format!("<string>{}</string>", abs_bin.display())),
+        "relative --bin must be stored absolute; got {plist}"
+    );
+    assert!(plist.contains("<string>--config-dir</string>"));
+    assert!(
+        plist.contains(&format!("<string>{}</string>", abs_cfg.display())),
+        "relative --config-dir must be stored absolute; got {plist}"
+    );
+}
+
+#[test]
 fn watch_runs_sync_after_temp_dir_change() {
     let root = scratch();
     let local = root.join("local");

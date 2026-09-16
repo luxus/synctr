@@ -57,14 +57,15 @@ pub fn generate_schedule(
     name: &str,
     bin: &Path,
     interval_secs: u64,
+    config_dir: Option<&Path>,
 ) -> Result<ScheduleSpec> {
     validate_name(name)?;
     if interval_secs == 0 {
         return Err(Error::InvalidInterval);
     }
     let files = match kind {
-        ScheduleKind::Systemd => systemd_files(name, bin, interval_secs),
-        ScheduleKind::Launchd => vec![launchd_file(name, bin, interval_secs)],
+        ScheduleKind::Systemd => systemd_files(name, bin, interval_secs, config_dir),
+        ScheduleKind::Launchd => vec![launchd_file(name, bin, interval_secs, config_dir)],
     };
     Ok(ScheduleSpec {
         kind,
@@ -118,9 +119,8 @@ fn install_dir_from(
 pub fn enable_hint(kind: ScheduleKind, dest: &Path, name: &str, used_default: bool) -> String {
     match kind {
         ScheduleKind::Systemd => {
-            let mut hint = format!(
-                "not enabled. to start: systemctl --user enable --now synctr-{name}.timer"
-            );
+            let mut hint =
+                format!("not enabled. to start: systemctl --user enable --now synctr-{name}.timer");
             if !used_default {
                 hint.push_str(&format!(
                     "\nwrote under {}; systemd --user only loads from the user unit dir unless you link these files there",
@@ -160,8 +160,13 @@ pub fn uninstall_schedule(dir: &Path, kind: ScheduleKind, name: &str) -> Result<
     Ok(removed)
 }
 
-fn systemd_files(name: &str, bin: &Path, interval_secs: u64) -> Vec<ScheduleFile> {
-    let exec = format!("{} sync {}", systemd_quote(&bin.display().to_string()), name);
+fn systemd_files(
+    name: &str,
+    bin: &Path,
+    interval_secs: u64,
+    config_dir: Option<&Path>,
+) -> Vec<ScheduleFile> {
+    let exec = systemd_exec(bin, name, config_dir);
     let service = format!(
         "[Unit]\nDescription=synctr sync {name}\n\n[Service]\nType=oneshot\nExecStart={exec}\n"
     );
@@ -180,10 +185,33 @@ fn systemd_files(name: &str, bin: &Path, interval_secs: u64) -> Vec<ScheduleFile
     ]
 }
 
-fn launchd_file(name: &str, bin: &Path, interval_secs: u64) -> ScheduleFile {
+fn systemd_exec(bin: &Path, name: &str, config_dir: Option<&Path>) -> String {
+    let mut parts = vec![systemd_quote(&bin.display().to_string())];
+    if let Some(dir) = config_dir {
+        parts.push("--config-dir".into());
+        parts.push(systemd_quote(&dir.display().to_string()));
+    }
+    parts.push("sync".into());
+    parts.push(name.to_string());
+    parts.join(" ")
+}
+
+fn launchd_file(
+    name: &str,
+    bin: &Path,
+    interval_secs: u64,
+    config_dir: Option<&Path>,
+) -> ScheduleFile {
     let label = format!("dev.luxus.synctr.{name}");
     let bin_xml = xml_escape(&bin.display().to_string());
     let name_xml = xml_escape(name);
+    let config_args = match config_dir {
+        Some(dir) => format!(
+            "\n\t\t<string>--config-dir</string>\n\t\t<string>{}</string>",
+            xml_escape(&dir.display().to_string())
+        ),
+        None => String::new(),
+    };
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -193,7 +221,7 @@ fn launchd_file(name: &str, bin: &Path, interval_secs: u64) -> ScheduleFile {
 	<string>{label}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>{bin_xml}</string>
+		<string>{bin_xml}</string>{config_args}
 		<string>sync</string>
 		<string>{name_xml}</string>
 	</array>
@@ -212,10 +240,16 @@ fn launchd_file(name: &str, bin: &Path, interval_secs: u64) -> ScheduleFile {
 }
 
 fn systemd_quote(s: &str) -> String {
-    if s.chars()
-        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
-    {
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    let needs_quote = s
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | '$' | '%' | ';'));
+    if needs_quote {
+        // systemd still expands $ and % inside double quotes; $$ / %% are literals.
+        let escaped = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "$$")
+            .replace('%', "%%");
         format!("\"{escaped}\"")
     } else {
         s.to_string()
@@ -249,6 +283,7 @@ mod tests {
             "docs",
             Path::new("/opt/synctr/bin/synctr"),
             1800,
+            None,
         )
         .unwrap();
         assert_eq!(spec.files.len(), 2);
@@ -270,6 +305,7 @@ mod tests {
             "docs",
             Path::new("/opt/synctr/bin/synctr"),
             600,
+            None,
         )
         .unwrap();
         assert_eq!(spec.files.len(), 1);
@@ -292,6 +328,7 @@ mod tests {
             "docs",
             Path::new("/bin/synctr"),
             3600,
+            None,
         )
         .unwrap();
         let written = install_schedule(&dir, &spec).unwrap();
@@ -307,7 +344,13 @@ mod tests {
     #[test]
     fn rejects_zero_interval_and_bad_kind() {
         assert!(matches!(
-            generate_schedule(ScheduleKind::Systemd, "docs", Path::new("/bin/synctr"), 0),
+            generate_schedule(
+                ScheduleKind::Systemd,
+                "docs",
+                Path::new("/bin/synctr"),
+                0,
+                None
+            ),
             Err(Error::InvalidInterval)
         ));
         assert!(matches!(
@@ -323,6 +366,7 @@ mod tests {
             "docs",
             Path::new("/tmp/syn&ctr"),
             60,
+            None,
         )
         .unwrap();
         assert!(spec.files[0].body.contains("/tmp/syn&amp;ctr"));
@@ -338,12 +382,8 @@ mod tests {
             install_dir_from(ScheduleKind::Systemd, None, None),
             Err(Error::HomeNotFound)
         ));
-        let systemd = install_dir_from(
-            ScheduleKind::Systemd,
-            Some(PathBuf::from("/xdg")),
-            None,
-        )
-        .unwrap();
+        let systemd =
+            install_dir_from(ScheduleKind::Systemd, Some(PathBuf::from("/xdg")), None).unwrap();
         assert_eq!(systemd, PathBuf::from("/xdg/systemd/user"));
         let launchd = install_dir_from(
             ScheduleKind::Launchd,
@@ -372,5 +412,53 @@ mod tests {
         );
         assert!(systemd.contains("systemctl --user enable --now synctr-docs.timer"));
         assert!(systemd.contains("/tmp/units"));
+    }
+
+    #[test]
+    fn units_bake_config_dir_ahead_of_sync() {
+        let spec = generate_schedule(
+            ScheduleKind::Systemd,
+            "docs",
+            Path::new("/opt/synctr/bin/synctr"),
+            60,
+            Some(Path::new("/custom/synctr")),
+        )
+        .unwrap();
+        assert!(spec.files[0]
+            .body
+            .contains("ExecStart=/opt/synctr/bin/synctr --config-dir /custom/synctr sync docs"));
+        let spec = generate_schedule(
+            ScheduleKind::Launchd,
+            "docs",
+            Path::new("/opt/synctr/bin/synctr"),
+            60,
+            Some(Path::new("/custom/synctr")),
+        )
+        .unwrap();
+        let body = &spec.files[0].body;
+        assert!(body.contains("<string>--config-dir</string>"));
+        assert!(body.contains("<string>/custom/synctr</string>"));
+        let sync_at = body.find("<string>sync</string>").unwrap();
+        let cfg_at = body.find("<string>--config-dir</string>").unwrap();
+        assert!(cfg_at < sync_at);
+    }
+
+    #[test]
+    fn systemd_quotes_dollar_and_spaces_in_paths() {
+        let spec = generate_schedule(
+            ScheduleKind::Systemd,
+            "docs",
+            Path::new("/opt/My Synctr/bin/synctr"),
+            60,
+            Some(Path::new("/home/user/cfg$x")),
+        )
+        .unwrap();
+        let body = &spec.files[0].body;
+        assert!(
+            body.contains(
+                "ExecStart=\"/opt/My Synctr/bin/synctr\" --config-dir \"/home/user/cfg$$x\" sync docs"
+            ),
+            "got {body}"
+        );
     }
 }
