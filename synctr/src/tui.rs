@@ -1,6 +1,5 @@
 use std::io::{self, stdout, BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -18,7 +17,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Terminal;
 use synctr_engine::{
     age_label, read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths,
-    Profile, ProfileStore, RcloneJson, ResolvedRclone,
+    Profile, ProfileStore, RcloneJson, ResolvedRclone, SyncChild,
 };
 
 pub fn run(store: &ProfileStore, rclone_flag: Option<&Path>) -> synctr_engine::Result<()> {
@@ -48,7 +47,7 @@ struct Row {
 
 struct Running {
     name: String,
-    child: Child,
+    child: SyncChild,
 }
 
 struct Ui {

@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 
 use crate::error::Result;
 use crate::ignore::load_filters;
+use crate::lock::{try_lock_profile, ProfileLock};
 use crate::paths::Paths;
 use crate::profile::Profile;
 use crate::rclone::{resolve_rclone_live, ResolvedRclone};
@@ -76,19 +77,42 @@ pub fn prepare_filter_file(paths: &Paths, profile: &Profile) -> Result<PathBuf> 
     Ok(dest)
 }
 
+#[derive(Debug)]
+pub struct SyncChild {
+    pub child: Child,
+    _lock: ProfileLock,
+}
+
+impl std::ops::Deref for SyncChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for SyncChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
 pub fn spawn_sync(
     paths: &Paths,
     profile: &Profile,
     resolved: &ResolvedRclone,
     dry_run: bool,
-) -> Result<Child> {
+) -> Result<SyncChild> {
+    let _lock = try_lock_profile(paths, &profile.name)?;
     let filter = prepare_filter_file(paths, profile)?;
     let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(cmd.spawn()?)
+    Ok(SyncChild {
+        child: cmd.spawn()?,
+        _lock,
+    })
 }
 
 pub fn run_sync(
@@ -109,6 +133,7 @@ pub fn execute_sync(
     inherit_stdio: bool,
     dry_run: bool,
 ) -> Result<SyncOutcome> {
+    let _lock = try_lock_profile(paths, &profile.name)?;
     let filter = prepare_filter_file(paths, profile)?;
     let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
@@ -255,5 +280,64 @@ mod tests {
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());
+    }
+
+    #[test]
+    fn overlapping_sync_returns_profile_busy() {
+        let (root, paths) = scratch("runner-lock");
+        let wait_bin = write_exec(
+            &root,
+            "rclone-wait",
+            "#!/bin/sh\necho started\nwhile true; do sleep 1; done\n",
+        );
+        let ok_bin = write_exec(&root, "rclone-ok", "#!/bin/sh\nexit 0\n");
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:x".into(),
+            Mode::Copy,
+            Some(wait_bin.clone()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let mut first = spawn_sync(
+            &paths,
+            &profile,
+            &ResolvedRclone {
+                path: wait_bin,
+                source: ResolveSource::Profile,
+            },
+            false,
+        )
+        .unwrap();
+        let err = execute_sync(
+            &paths,
+            &profile,
+            ResolvedRclone {
+                path: ok_bin.clone(),
+                source: ResolveSource::Profile,
+            },
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, crate::error::Error::ProfileBusy(name) if name == "docs"));
+        first.kill().unwrap();
+        first.wait().unwrap();
+        drop(first);
+        execute_sync(
+            &paths,
+            &profile,
+            ResolvedRclone {
+                path: ok_bin,
+                source: ResolveSource::Profile,
+            },
+            false,
+            false,
+        )
+        .unwrap();
     }
 }
