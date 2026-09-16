@@ -14,6 +14,8 @@ Version **0.1.0**. Tag that as `v0.1.0`.
 
 ### Cargo, from a clone
 
+Rust **1.88** or newer (workspace `rust-version`). 1.83 cannot parse the locked crates.
+
 ```
 git clone git@github.com:luxus/synctr.git
 cd synctr
