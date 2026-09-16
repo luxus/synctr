@@ -25,6 +25,8 @@ pub enum Error {
     InvalidInterval,
     #[error("home directory not found (set HOME or XDG_CONFIG_HOME, or pass --dir)")]
     HomeNotFound,
+    #[error("profile `{0}` is already running")]
+    ProfileBusy(String),
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("toml: {0}")]

@@ -1,5 +1,6 @@
 mod error;
 mod ignore;
+mod lock;
 mod paths;
 mod profile;
 mod rclone;
@@ -10,6 +11,7 @@ mod watch;
 
 pub use error::{Error, Result};
 pub use ignore::{load_filters, FilterRule, FilterSet, DEFAULT_PATTERNS};
+pub use lock::{try_lock_profile, ProfileLock};
 pub use paths::{make_absolute, Paths};
 pub use profile::{validate_name, Mode, Profile, ProfileEdit, ProfileStore};
 pub use rclone::{
@@ -17,7 +19,8 @@ pub use rclone::{
     ResolveSource, ResolvedRclone,
 };
 pub use runner::{
-    build_sync_argv, execute_sync, prepare_filter_file, run_sync, spawn_sync, SyncArgv, SyncOutcome,
+    build_sync_argv, execute_sync, prepare_filter_file, run_sync, spawn_sync, SyncArgv, SyncChild,
+    SyncOutcome,
 };
 pub use schedule::{
     default_install_dir, enable_hint, generate_schedule, install_schedule, schedule_filenames,

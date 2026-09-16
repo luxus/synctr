@@ -74,6 +74,9 @@ pub fn run(
                         eprintln!("{name} exit {}", outcome.exit_code);
                     }
                 }
+                Err(Error::ProfileBusy(_)) => {
+                    eprintln!("skipped {name}: already running");
+                }
                 Err(e) => eprintln!("{name}: {e}"),
             }
         }
