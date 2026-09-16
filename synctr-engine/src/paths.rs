@@ -25,6 +25,7 @@ impl Paths {
     }
 
     pub fn from_config_dir(config_dir: PathBuf) -> Self {
+        let config_dir = make_absolute(&config_dir);
         let state_dir = env_dir("SYNCTR_STATE_DIR").unwrap_or_else(|| config_dir.join("state"));
         let cache_dir = env_dir("SYNCTR_CACHE_DIR").unwrap_or_else(|| config_dir.join("cache"));
         Self::assemble(config_dir, state_dir, cache_dir)
@@ -53,7 +54,9 @@ impl Paths {
     }
 
     pub fn filter_file(&self, name: &str) -> PathBuf {
-        self.cache_dir.join("filters").join(format!("{name}.filter"))
+        self.cache_dir
+            .join("filters")
+            .join(format!("{name}.filter"))
     }
 }
 
@@ -62,7 +65,9 @@ fn home() -> PathBuf {
 }
 
 fn env_dir(key: &str) -> Option<PathBuf> {
-    env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from)
+    env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn expand_tilde(path: &Path) -> PathBuf {
@@ -76,6 +81,20 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Tilde-expand and, if still relative, join with the process cwd.
+/// Relative profile locals and `--config-dir` / `--bin` break under systemd
+/// (user units typically start with cwd `/`).
+pub fn make_absolute(path: &Path) -> PathBuf {
+    let path = expand_tilde(path);
+    if path.is_absolute() {
+        return path;
+    }
+    match env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,7 +104,26 @@ mod tests {
         let p = Paths::from_config_dir(PathBuf::from("/tmp/synctr-cfg"));
         assert_eq!(p.profiles_dir, PathBuf::from("/tmp/synctr-cfg/profiles"));
         assert_eq!(p.ignore_file, PathBuf::from("/tmp/synctr-cfg/ignore"));
-        assert_eq!(p.profile_toml("docs"), PathBuf::from("/tmp/synctr-cfg/profiles/docs.toml"));
-        assert_eq!(p.profile_ignore("docs"), PathBuf::from("/tmp/synctr-cfg/profiles/docs.ignore"));
+        assert_eq!(
+            p.profile_toml("docs"),
+            PathBuf::from("/tmp/synctr-cfg/profiles/docs.toml")
+        );
+        assert_eq!(
+            p.profile_ignore("docs"),
+            PathBuf::from("/tmp/synctr-cfg/profiles/docs.ignore")
+        );
+    }
+
+    #[test]
+    fn relative_config_dir_is_joined_with_cwd() {
+        let cwd = std::env::current_dir().unwrap();
+        let p = Paths::from_config_dir(PathBuf::from("rel-cfg"));
+        assert_eq!(p.config_dir, cwd.join("rel-cfg"));
+        assert!(p.config_dir.is_absolute());
+        assert_eq!(
+            make_absolute(Path::new("/abs/bin")),
+            PathBuf::from("/abs/bin")
+        );
+        assert_eq!(make_absolute(Path::new("bin")), cwd.join("bin"));
     }
 }

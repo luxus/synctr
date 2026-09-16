@@ -10,7 +10,7 @@ mod watch;
 
 pub use error::{Error, Result};
 pub use ignore::{load_filters, FilterRule, FilterSet, DEFAULT_PATTERNS};
-pub use paths::Paths;
+pub use paths::{make_absolute, Paths};
 pub use profile::{validate_name, Mode, Profile, ProfileEdit, ProfileStore};
 pub use rclone::{
     resolve_rclone, resolve_rclone_live, well_known, FsProbe, RealFs, ResolveRequest,

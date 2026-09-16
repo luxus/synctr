@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::paths::{expand_tilde, Paths};
+use crate::paths::{make_absolute, Paths};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,8 +93,8 @@ impl Profile {
         if !remote.contains(':') {
             return Err(Error::InvalidRemote(remote));
         }
-        let local = expand_tilde(&local);
-        let rclone = rclone.map(|p| expand_tilde(&p));
+        let local = make_absolute(&local);
+        let rclone = rclone.map(|p| make_absolute(&p));
         Ok(Self {
             name,
             local,
@@ -182,7 +182,7 @@ impl ProfileStore {
         }
         let mut profile = self.get(name)?;
         if let Some(local) = edit.local {
-            profile.local = expand_tilde(&local);
+            profile.local = make_absolute(&local);
         }
         if let Some(remote) = edit.remote {
             if !remote.contains(':') {
@@ -194,7 +194,7 @@ impl ProfileStore {
             profile.mode = mode;
         }
         if let Some(rclone) = edit.rclone {
-            profile.rclone = rclone.map(|p| expand_tilde(&p));
+            profile.rclone = rclone.map(|p| make_absolute(&p));
         }
         if let Some(extra_flags) = edit.extra_flags {
             profile.extra_flags = extra_flags;
@@ -325,7 +325,10 @@ mod tests {
         assert!(crate::status::read_last_run(&paths, "docs")
             .unwrap()
             .is_some());
-        assert!(matches!(store.edit("docs", ProfileEdit::default()), Err(Error::EmptyEdit)));
+        assert!(matches!(
+            store.edit("docs", ProfileEdit::default()),
+            Err(Error::EmptyEdit)
+        ));
     }
 
     #[test]
@@ -352,7 +355,10 @@ mod tests {
         assert!(!paths.profile_toml("docs").exists());
         assert!(!paths.profile_ignore("docs").exists());
         assert!(!paths.last_run("docs").exists());
-        assert_eq!(fs::read_to_string(paths.profile_ignore("notes")).unwrap(), "*.tmp\n");
+        assert_eq!(
+            fs::read_to_string(paths.profile_ignore("notes")).unwrap(),
+            "*.tmp\n"
+        );
         assert!(crate::status::read_last_run(&paths, "notes")
             .unwrap()
             .is_some());
@@ -371,5 +377,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, Error::InvalidRemote(_)));
+    }
+
+    #[test]
+    fn relative_local_and_rclone_are_stored_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let p = Profile::new(
+            "docs".into(),
+            PathBuf::from("docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            Some(PathBuf::from("bin/rclone")),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(p.local, cwd.join("docs"));
+        assert_eq!(p.rclone.as_deref(), Some(cwd.join("bin/rclone").as_path()));
+        assert!(p.local.is_absolute());
     }
 }

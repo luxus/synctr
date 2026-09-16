@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 use synctr_engine::{
     default_install_dir, enable_hint, generate_schedule, install_schedule, last_run_short,
-    status_snapshot, uninstall_schedule, write_status_json, Mode, Paths, Profile, ProfileEdit,
-    ProfileStore, RcloneJson, ScheduleKind,
+    make_absolute, status_snapshot, uninstall_schedule, write_status_json, Mode, Paths, Profile,
+    ProfileEdit, ProfileStore, RcloneJson, ScheduleKind,
 };
 
 mod tui;
@@ -216,7 +216,11 @@ fn try_main() -> synctr_engine::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Schedule { command } => {
-            schedule_cmd(cli.json, command)?;
+            let baked_config = cli
+                .config_dir
+                .as_ref()
+                .map(|_| store.paths().config_dir.clone());
+            schedule_cmd(cli.json, baked_config.as_deref(), command)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::WhichRclone { profile } => {
@@ -355,12 +359,16 @@ fn schedule_kind(kind: Option<String>) -> synctr_engine::Result<ScheduleKind> {
 
 fn synctr_bin(bin: Option<PathBuf>) -> synctr_engine::Result<PathBuf> {
     match bin {
-        Some(p) => Ok(p),
+        Some(p) => Ok(make_absolute(&p)),
         None => std::env::current_exe().map_err(synctr_engine::Error::from),
     }
 }
 
-fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
+fn schedule_cmd(
+    json: bool,
+    config_dir: Option<&std::path::Path>,
+    cmd: ScheduleCmd,
+) -> synctr_engine::Result<()> {
     match cmd {
         ScheduleCmd::Generate {
             name,
@@ -368,7 +376,13 @@ fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
             interval,
             bin,
         } => {
-            let spec = generate_schedule(schedule_kind(kind)?, &name, &synctr_bin(bin)?, interval)?;
+            let spec = generate_schedule(
+                schedule_kind(kind)?,
+                &name,
+                &synctr_bin(bin)?,
+                interval,
+                config_dir,
+            )?;
             if json {
                 print_json(&spec)?;
             } else {
@@ -389,7 +403,7 @@ fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
             dir,
         } => {
             let kind = schedule_kind(kind)?;
-            let spec = generate_schedule(kind, &name, &synctr_bin(bin)?, interval)?;
+            let spec = generate_schedule(kind, &name, &synctr_bin(bin)?, interval, config_dir)?;
             let used_default = dir.is_none();
             let dest = match dir {
                 Some(d) => d,
