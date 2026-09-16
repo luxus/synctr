@@ -123,6 +123,8 @@ fn help_lists_commands() {
     assert!(text.contains("schedule"));
     assert!(text.contains("which-rclone"));
     assert!(text.contains("status"));
+    assert!(text.contains("doctor"));
+    assert!(text.contains("test-remote"));
     assert!(text.contains("tui"));
 }
 
@@ -972,5 +974,135 @@ fn watch_preflights_rclone_before_printing_watching() {
     assert!(
         !combined.contains("watching "),
         "must fail before the watching banner; out={combined}"
+    );
+}
+
+#[test]
+fn doctor_json_reports_rclone_and_missing_local() {
+    let root = scratch();
+    add_docs(&root, Path::new("/no/such/synctr-docs-local"), None);
+    let fake = stub_rclone(&root);
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "--json",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "missing local should fail doctor");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["rclone"]["found"], true);
+    assert_eq!(v["rclone"]["path"], fake.to_str().unwrap());
+    assert_eq!(v["config_dir"], root.to_str().unwrap());
+    assert_eq!(v["profiles"][0]["name"], "docs");
+    assert_eq!(v["profiles"][0]["local_exists"], false);
+    assert_eq!(v["profiles"][0]["busy"], false);
+    assert!(v["profiles"][0]["ok"] == false);
+
+    let local = root.join("docs");
+    fs::create_dir_all(&local).unwrap();
+    let add = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "edit",
+            "docs",
+            "--local",
+            local.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "--json",
+            "doctor",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["profiles"][0]["local_exists"], true);
+}
+
+#[test]
+fn test_remote_probes_lsd_and_times_out() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let fake = stub_rclone(&root);
+    add_docs(&root, &local, Some(&fake));
+    let log = root.join("stub.log");
+    let out = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "--json",
+            "test-remote",
+            "docs",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["name"], "docs");
+    assert_eq!(v["remote"], "b2:bucket/docs");
+    let recorded = parse_stub_line(fs::read_to_string(&log).unwrap().trim());
+    assert_eq!(recorded.get(1).map(String::as_str), Some("lsd"));
+    assert_eq!(recorded.get(2).map(String::as_str), Some("b2:bucket/docs"));
+
+    let hang = root.join("rclone-hang");
+    fs::write(&hang, "#!/bin/sh\nwhile true; do sleep 1; done\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = fs::metadata(&hang).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&hang, p).unwrap();
+    }
+    let out = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            hang.to_str().unwrap(),
+            "--json",
+            "test-remote",
+            "docs",
+            "--timeout",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["detail"].as_str().unwrap().contains("timeout"),
+        "{}",
+        v["detail"]
     );
 }

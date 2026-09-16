@@ -1,3 +1,4 @@
+mod doctor;
 mod error;
 mod ignore;
 mod lock;
@@ -11,6 +12,7 @@ mod status;
 mod watch;
 
 pub use error::{Error, Result};
+pub use doctor::{doctor_report, test_remote, DoctorReport, RemoteProbe};
 pub use ignore::{load_filters, FilterRule, FilterSet, DEFAULT_PATTERNS};
 pub use lock::{profile_is_busy, try_lock_profile, ProfileLock};
 pub use paths::{make_absolute, Paths};
