@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 serde = { version = "=1.0.217", features = ["derive"] }
+serde_json = "=1.0.134"
 thiserror = "=2.0.11"
 toml = "=0.8.23"
 dirs = "=6.0.0"

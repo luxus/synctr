@@ -4,9 +4,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use synctr_engine::{
-    default_install_dir, enable_hint, generate_schedule, install_schedule, resolve_rclone_live,
-    status_snapshot, uninstall_schedule, Mode, Paths, Profile, ProfileEdit, ProfileStore,
-    RcloneJson, ScheduleKind,
+    default_install_dir, enable_hint, generate_schedule, install_schedule, last_run_short,
+    status_snapshot, uninstall_schedule, write_status_json, Mode, Paths, Profile, ProfileEdit,
+    ProfileStore, RcloneJson, ScheduleKind,
 };
 
 mod tui;
@@ -368,12 +368,7 @@ fn schedule_cmd(json: bool, cmd: ScheduleCmd) -> synctr_engine::Result<()> {
             interval,
             bin,
         } => {
-            let spec = generate_schedule(
-                schedule_kind(kind)?,
-                &name,
-                &synctr_bin(bin)?,
-                interval,
-            )?;
+            let spec = generate_schedule(schedule_kind(kind)?, &name, &synctr_bin(bin)?, interval)?;
             if json {
                 print_json(&spec)?;
             } else {
@@ -450,25 +445,22 @@ fn which_rclone(
         Some(name) => store.get(&name)?.rclone,
         None => None,
     };
-    match resolve_rclone_live(rclone_flag, profile_rclone.as_deref()) {
-        Ok(found) => {
-            if json {
-                print_json(&RcloneJson::from(&found))?;
-            } else {
-                println!("{}", found.path.display());
-                println!("source: {}", found.source.explain());
-            }
+    let rclone = RcloneJson::from_live(rclone_flag, profile_rclone.as_deref())?;
+    if json {
+        print_json(&rclone)?;
+        return Ok(if rclone.found {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+    match (rclone.found, rclone.path, rclone.detail) {
+        (true, Some(path), Some(detail)) => {
+            println!("{}", path.display());
+            println!("source: {detail}");
             Ok(ExitCode::SUCCESS)
         }
-        Err(synctr_engine::Error::RcloneNotFound) => {
-            if json {
-                print_json(&RcloneJson::missing())?;
-                Ok(ExitCode::from(1))
-            } else {
-                Err(synctr_engine::Error::RcloneNotFound)
-            }
-        }
-        Err(e) => Err(e),
+        _ => Err(synctr_engine::Error::RcloneNotFound),
     }
 }
 
@@ -479,30 +471,22 @@ fn status_cmd(
 ) -> synctr_engine::Result<ExitCode> {
     let snap = status_snapshot(store, rclone_flag, None)?;
     if json {
-        print_json(&snap)?;
+        write_status_json(io::stdout().lock(), &snap)?;
         return Ok(ExitCode::SUCCESS);
     }
-    match (&snap.rclone.found, &snap.rclone.path, &snap.rclone.detail) {
-        (true, Some(path), Some(detail)) => println!("rclone: {} ({})", path.display(), detail),
-        _ => println!("rclone: not found"),
-    }
+    println!("rclone: {}", snap.rclone.human_line());
     if snap.profiles.is_empty() {
         println!("no profiles");
         return Ok(ExitCode::SUCCESS);
     }
     for p in snap.profiles {
-        let last = match p.last_run {
-            Some(run) if run.ok => format!("ok {}", run.finished_at),
-            Some(run) => format!("exit {} {}", run.exit_code, run.finished_at),
-            None => "never".into(),
-        };
         println!(
             "{}\t{}\t{}\t->\t{}\t{}",
             p.name,
             p.mode,
             p.local.display(),
             p.remote,
-            last
+            last_run_short(p.last_run.as_ref())
         );
     }
     Ok(ExitCode::SUCCESS)

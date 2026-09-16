@@ -22,6 +22,13 @@ impl SyncArgv {
         cmd.args(&self.args);
         cmd
     }
+
+    pub fn args_lossy(&self) -> Vec<String> {
+        self.args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,11 +164,7 @@ mod tests {
             false,
         );
         assert_eq!(argv.program, PathBuf::from("/usr/bin/rclone"));
-        let args: Vec<String> = argv
-            .args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let args = argv.args_lossy();
         assert_eq!(
             args,
             vec![
@@ -184,11 +187,7 @@ mod tests {
             Path::new("/tmp/docs.filter"),
             true,
         );
-        let dry_args: Vec<String> = dry
-            .args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let dry_args = dry.args_lossy();
         assert_eq!(&dry_args[..args.len()], args.as_slice());
         assert_eq!(dry_args.last().map(String::as_str), Some("--dry-run"));
     }
@@ -215,13 +214,17 @@ mod tests {
         };
         let outcome = execute_sync(&paths, &profile, resolved, false, false).unwrap();
         assert_eq!(outcome.exit_code, 7);
-        let last = crate::status::read_last_run(&paths, "docs").unwrap().unwrap();
+        let last = crate::status::read_last_run(&paths, "docs")
+            .unwrap()
+            .unwrap();
         assert_eq!(last.exit_code, 7);
         assert!(!last.ok);
-        let filter = fs::read_to_string(paths.filter_file("docs")).unwrap();
-        assert!(filter.contains("- node_modules/**"));
-        let filter = fs::read_to_string(paths.filter_file("docs")).unwrap();
-        assert!(filter.contains("- node_modules/**"));
+        let filters = crate::ignore::load_filters(&paths, &profile).unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.filter_file("docs")).unwrap(),
+            filters.to_filter_from()
+        );
+        assert!(filters.to_filter_from().contains("- node_modules/**"));
     }
 
     #[test]
