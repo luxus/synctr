@@ -1,0 +1,47 @@
+{
+  "rclone": {
+    "found": true,
+    "path": "/usr/bin/rclone",
+    "source": "PATH",
+    "detail": "PATH"
+  },
+  "profiles": [
+    {
+      "name": "docs",
+      "local": "/tmp/docs",
+      "remote": "b2:bucket/docs",
+      "mode": "sync",
+      "extra_flags": [],
+      "extra_ignore": [],
+      "last_run": {
+        "finished_at_unix": 0,
+        "finished_at": "1970-01-01T00:00:00Z",
+        "exit_code": 7,
+        "ok": false
+      },
+      "enabled": false
+    },
+    {
+      "name": "photos",
+      "local": "/tmp/photos",
+      "remote": "b2:bucket/photos",
+      "mode": "copy",
+      "extra_flags": [],
+      "extra_ignore": [],
+      "progress": {
+        "bytes": 100,
+        "total_bytes": 400,
+        "percent": 25,
+        "speed_bps": 50,
+        "eta_secs": 6,
+        "transfers": 1,
+        "total_transfers": 4,
+        "file": "a.bin",
+        "pid": 42,
+        "dry_run": true,
+        "updated_at_unix": 0,
+        "updated_at": "1970-01-01T00:00:00Z"
+      }
+    }
+  ]
+}

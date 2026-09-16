@@ -1,0 +1,13 @@
+{
+  "rclone": { "found": false },
+  "profiles": [
+    {
+      "name": "docs",
+      "local": "/tmp/docs",
+      "remote": "b2:bucket/docs",
+      "mode": "sync",
+      "extra_flags": ["--checksum"],
+      "extra_ignore": ["*.key"]
+    }
+  ]
+}

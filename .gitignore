@@ -3,3 +3,8 @@
 /result-*
 .direnv
 *.swp
+.DS_Store
+xcuserdata/
+contrib/menubar/SynctrMenuBar/.build/
+contrib/menubar/SynctrMenuBar/DerivedData/
+contrib/menubar/SynctrMenuBar/dist/

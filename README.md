@@ -141,7 +141,17 @@ While rclone is transferring, each profile may also include additive `progress` 
 
 The TUI state pane shows the same numbers (bar, bytes, speed, ETA, current file). synctr parses rclone `--use-json-log` stats (argv also passes `--stats 1s`).
 
-The Noctalia widget lives at `contrib/noctalia/synctr` and shells that command. A real Mac menu bar extra is not in this release. `contrib/menubar/` is a sketch that parses the same JSON.
+The Noctalia widget lives at `contrib/noctalia/synctr` and shells that command. The Mac menu bar extra is `contrib/menubar/` (SwiftUI `MenuBarExtra`). It polls this JSON, shows rclone found/missing and each `last_run.ok`, and starts a profile with `synctr sync <name>`. File Provider is #45, not this extra.
+
+## Mac menu bar extra
+
+Source: `contrib/menubar/`. Needs macOS 13+ and Xcode. This repo's Linux CI cannot compile the `.app`.
+
+```
+xcodebuild -project contrib/menubar/SynctrMenuBar/SynctrMenuBar.xcodeproj -scheme SynctrMenuBar -configuration Release CODE_SIGNING_ALLOWED=NO
+```
+
+Open the project as Emily: `open contrib/menubar/SynctrMenuBar/SynctrMenuBar.xcodeproj` (Signing Team `D2XV456V9A`). Linux consumer check: `./contrib/menubar/check.sh` and `SYNCTR_BIN=./target/debug/synctr ./contrib/menubar/status-poll.sh`. Full steps in `contrib/menubar/README.md`.
 
 ## Other commands
 
@@ -226,4 +236,4 @@ Profile fields: `name`, `local`, `remote`, `mode`, optional `rclone`, `extra_fla
 
 ## What 0.1.0 does not do
 
-See CHANGELOG.md. Short version: no real Mac menu extra, no remote creation, no automatic bisync `--resync`, no synctr-started launchd/systemd, no brew tap.
+See CHANGELOG.md. Short version: no remote creation, no automatic bisync `--resync`, no synctr-started launchd/systemd, no brew tap, no File Provider. The Mac menu bar extra is source in `contrib/menubar/` (#7); it is not in the GitHub Release tarballs and is not notarized.
