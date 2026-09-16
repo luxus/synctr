@@ -69,7 +69,7 @@ pub fn run(
         }
         if debounce.take_ready(Instant::now()) {
             eprintln!("change detected, syncing {name}");
-            match run_sync(store.paths(), &profile, rclone_flag, true, false) {
+            match run_sync(store.paths(), &profile, rclone_flag, true, false, false) {
                 Ok(outcome) => {
                     if outcome.exit_code != 0 {
                         eprintln!("{name} exit {}", outcome.exit_code);

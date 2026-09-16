@@ -48,6 +48,7 @@ pub fn build_sync_argv(
     profile: &Profile,
     filter_file: &Path,
     dry_run: bool,
+    resync: bool,
 ) -> SyncArgv {
     let mut args: Vec<OsString> = vec![
         profile.mode.rclone_subcommand().into(),
@@ -62,6 +63,9 @@ pub fn build_sync_argv(
     ];
     for flag in &profile.extra_flags {
         args.push(flag.into());
+    }
+    if resync {
+        args.push("--resync".into());
     }
     if dry_run {
         args.push("--dry-run".into());
@@ -107,11 +111,18 @@ pub fn spawn_sync(
     profile: &Profile,
     resolved: &ResolvedRclone,
     dry_run: bool,
+    resync: bool,
 ) -> Result<SyncChild> {
     profile.require_enabled()?;
+    if resync && profile.mode != crate::profile::Mode::Bisync {
+        return Err(Error::ResyncNotBisync(
+            profile.name.clone(),
+            profile.mode.as_str(),
+        ));
+    }
     let _lock = try_lock_profile(paths, &profile.name)?;
     let filter = prepare_filter_file(paths, profile)?;
-    let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
+    let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run, resync);
     let mut cmd = argv.command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -139,9 +150,10 @@ pub fn run_sync(
     rclone_flag: Option<&Path>,
     inherit_stdio: bool,
     dry_run: bool,
+    resync: bool,
 ) -> Result<SyncOutcome> {
     let resolved = resolve_rclone_live(rclone_flag, profile.rclone.as_deref())?;
-    execute_sync(paths, profile, resolved, inherit_stdio, dry_run)
+    execute_sync(paths, profile, resolved, inherit_stdio, dry_run, resync)
 }
 
 pub fn execute_sync(
@@ -150,8 +162,9 @@ pub fn execute_sync(
     resolved: ResolvedRclone,
     inherit_stdio: bool,
     dry_run: bool,
+    resync: bool,
 ) -> Result<SyncOutcome> {
-    let mut spawned = spawn_sync(paths, profile, &resolved, dry_run)?;
+    let mut spawned = spawn_sync(paths, profile, &resolved, dry_run, resync)?;
     let (stdout, stderr) = drain_rclone(&mut spawned, inherit_stdio)?;
     let status = spawned.child.wait()?;
     let exit_code = status.code().unwrap_or(1);
@@ -259,6 +272,7 @@ mod tests {
             &profile,
             Path::new("/tmp/docs.filter"),
             false,
+            false,
         );
         assert_eq!(argv.program, PathBuf::from("/usr/bin/rclone"));
         let args = argv.args_lossy();
@@ -285,6 +299,7 @@ mod tests {
             &profile,
             Path::new("/tmp/docs.filter"),
             true,
+            false,
         );
         let dry_args = dry.args_lossy();
         assert_eq!(&dry_args[..args.len()], args.as_slice());
@@ -311,7 +326,7 @@ mod tests {
             path: bin,
             source: ResolveSource::Profile,
         };
-        let outcome = execute_sync(&paths, &profile, resolved, false, false).unwrap();
+        let outcome = execute_sync(&paths, &profile, resolved, false, false, false).unwrap();
         assert_eq!(outcome.exit_code, 7);
         let last = crate::status::read_last_run(&paths, "docs")
             .unwrap()
@@ -350,7 +365,7 @@ mod tests {
             path: bin,
             source: ResolveSource::Profile,
         };
-        let mut child = spawn_sync(&paths, &profile, &resolved, false).unwrap();
+        let mut child = spawn_sync(&paths, &profile, &resolved, false, false).unwrap();
         child.kill().unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success());
@@ -386,6 +401,7 @@ while true; do sleep 1; done
                 path: bin,
                 source: ResolveSource::Profile,
             },
+            false,
             false,
         )
         .unwrap();
@@ -457,6 +473,7 @@ while true; do sleep 1; done
                 source: ResolveSource::Profile,
             },
             false,
+            false,
         )
         .unwrap();
         let err = execute_sync(
@@ -466,6 +483,7 @@ while true; do sleep 1; done
                 path: ok_bin.clone(),
                 source: ResolveSource::Profile,
             },
+            false,
             false,
             false,
         )
@@ -481,6 +499,7 @@ while true; do sleep 1; done
                 path: ok_bin,
                 source: ResolveSource::Profile,
             },
+            false,
             false,
             false,
         )
@@ -512,9 +531,78 @@ while true; do sleep 1; done
                 source: ResolveSource::Profile,
             },
             false,
+            false,
         )
         .unwrap_err();
         assert!(matches!(err, crate::error::Error::ProfileDisabled(name) if name == "docs"));
+        assert!(!crate::lock::profile_is_busy(&paths, "docs"));
+    }
+
+    #[test]
+    fn argv_appends_resync_before_dry_run_for_bisync() {
+        let profile = Profile::new(
+            "notes".into(),
+            PathBuf::from("/tmp/notes"),
+            "b2:bucket/notes".into(),
+            Mode::Bisync,
+            None,
+            vec!["--checksum".into()],
+            vec![],
+        )
+        .unwrap();
+        let argv = build_sync_argv(
+            Path::new("/usr/bin/rclone"),
+            &profile,
+            Path::new("/tmp/notes.filter"),
+            false,
+            true,
+        );
+        let args = argv.args_lossy();
+        assert_eq!(args[0], "bisync");
+        assert_eq!(args.last().map(String::as_str), Some("--resync"));
+        assert!(!args.iter().any(|a| a == "--dry-run"));
+        let dry = build_sync_argv(
+            Path::new("/usr/bin/rclone"),
+            &profile,
+            Path::new("/tmp/notes.filter"),
+            true,
+            true,
+        )
+        .args_lossy();
+        assert_eq!(dry[dry.len() - 2], "--resync");
+        assert_eq!(dry.last().map(String::as_str), Some("--dry-run"));
+    }
+
+    #[test]
+    fn spawn_sync_refuses_resync_unless_bisync() {
+        let (root, paths) = scratch("runner-resync");
+        let bin = write_exec(&root, "rclone", "#!/bin/sh\nexit 0\n");
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:x".into(),
+            Mode::Copy,
+            Some(bin.clone()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let err = spawn_sync(
+            &paths,
+            &profile,
+            &ResolvedRclone {
+                path: bin,
+                source: ResolveSource::Profile,
+            },
+            false,
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::ResyncNotBisync(name, "copy") if name == "docs")
+        );
         assert!(!crate::lock::profile_is_busy(&paths, "docs"));
     }
 }

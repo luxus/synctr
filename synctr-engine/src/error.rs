@@ -29,6 +29,8 @@ pub enum Error {
     ProfileBusy(String),
     #[error("profile `{0}` is disabled (synctr profile enable {0})")]
     ProfileDisabled(String),
+    #[error("`--resync` is only for bisync profiles (profile `{0}` is {1})")]
+    ResyncNotBisync(String, &'static str),
     #[error("io: {0}")]
     Io(#[from] io::Error),
     #[error("toml: {0}")]

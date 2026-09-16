@@ -8,7 +8,7 @@ Version **0.1.0**. Tag that as `v0.1.0`.
 
 1. rclone, already installed. `synctr which-rclone` prints the binary it will use.
 2. A remote that already exists. `remote:path` in a profile is passed straight to rclone. If `rclone lsd remote:` fails, `synctr sync` will fail the same way.
-3. For **bisync** only: rclone wants a first `--resync` (or its current equivalent) before a normal bisync will run. synctr never passes that flag. The first `synctr sync` on a new bisync profile will fail with rclone's error until you resync yourself.
+3. For **bisync** only: rclone wants a first `--resync` before a normal bisync will run. `synctr sync <name> --resync` is that pass (same argv plus rclone `--resync`). copy and sync profiles reject the flag. synctr does not auto-resync on first failure.
 
 ## Install
 
@@ -68,7 +68,7 @@ synctr tui
 
 `--rclone PATH` overrides discovery for that process. `SYNCTR_RCLONE` and a profile `rclone` field do the same, in that order. `--config-dir DIR` overrides `~/.config/synctr`.
 
-Modes on `profile add` / `profile edit`: `copy`, `sync`, `bisync`. `synctr sync <name>` runs whatever mode the profile has.
+Modes on `profile add` / `profile edit`: `copy`, `sync`, `bisync`. `synctr sync <name>` runs whatever mode the profile has. Bisync's first pass is `synctr sync <name> --resync`.
 
 ## TUI keys
 
@@ -209,7 +209,7 @@ More patterns, gitignore syntax, from:
 
 GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway.
 
-`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, `--use-json-log`, and `--stats 1s`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's. JSON stats lines are parsed into live `progress` on `status --json`.
+`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, `--use-json-log`, and `--stats 1s`, then the profile's extra flags, then `--resync` when requested (bisync only), then `--dry-run` when requested. Exit status is rclone's. JSON stats lines are parsed into live `progress` on `status --json`.
 
 ## Config
 
