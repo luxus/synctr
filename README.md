@@ -39,11 +39,11 @@ Another flake can take `inputs.synctr.packages.${system}.synctr`. The package is
 
 ### Release tarball
 
-After you tag `v0.1.0`, Actions uploads:
+After you tag `v0.1.0`, Actions attaches these tarballs to the GitHub Release:
 
-- `synctr-0.1.0-x86_64-unknown-linux-gnu`
-- `synctr-0.1.0-aarch64-apple-darwin`
-- `synctr-0.1.0-x86_64-apple-darwin`
+- `synctr-0.1.0-x86_64-unknown-linux-gnu.tar.gz`
+- `synctr-0.1.0-aarch64-apple-darwin.tar.gz`
+- `synctr-0.1.0-x86_64-apple-darwin.tar.gz`
 
 No aarch64-linux artifact, no notarization, no brew tap.
 
