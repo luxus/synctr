@@ -176,6 +176,7 @@ impl ProfileStore {
         fs::remove_file(path)?;
         let _ = fs::remove_file(self.paths.profile_ignore(name));
         let _ = fs::remove_file(self.paths.last_run(name));
+        let _ = fs::remove_file(self.paths.inflight(name));
         Ok(())
     }
 

@@ -53,6 +53,17 @@ impl Paths {
         self.state_dir.join("runs").join(format!("{name}.toml"))
     }
 
+    pub fn lock_file(&self, name: &str) -> PathBuf {
+        self.state_dir.join("locks").join(format!("{name}.lock"))
+    }
+
+    /// Written while a sync holds the #15 flock. Readable by `status --json`.
+    pub fn inflight(&self, name: &str) -> PathBuf {
+        self.state_dir
+            .join("inflight")
+            .join(format!("{name}.toml"))
+    }
+
     pub fn filter_file(&self, name: &str) -> PathBuf {
         self.cache_dir
             .join("filters")

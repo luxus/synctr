@@ -14,7 +14,7 @@ pub fn try_lock_profile(paths: &Paths, name: &str) -> Result<ProfileLock> {
     validate_name(name)?;
     let dir = paths.state_dir.join("locks");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{name}.lock"));
+    let path = paths.lock_file(name);
     let file = OpenOptions::new()
         .create(true)
         .read(true)
@@ -24,6 +24,23 @@ pub fn try_lock_profile(paths: &Paths, name: &str) -> Result<ProfileLock> {
         return Err(Error::ProfileBusy(name.to_string()));
     }
     Ok(ProfileLock { _file: file })
+}
+
+/// Snapshot: true if another process holds the exclusive flock.
+/// Briefly takes and drops the lock when idle; do not call while this
+/// process already holds `ProfileLock` for the same name (would self-busy).
+pub fn profile_lock_held(paths: &Paths, name: &str) -> Result<bool> {
+    validate_name(name)?;
+    let path = paths.lock_file(name);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(!try_exclusive(&file)?)
 }
 
 #[cfg(unix)]

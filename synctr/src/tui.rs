@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use synctr_engine::{
-    age_label, read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths,
-    Profile, ProfileStore, RcloneJson, ResolvedRclone, SyncChild,
+    age_label, apply_rclone_log_line, read_inflight, read_last_run, resolve_rclone_live, spawn_sync,
+    write_last_run, LastRun, Paths, Profile, ProfileStore, RcloneJson, ResolvedRclone, SyncChild,
 };
 
 pub fn run(store: &ProfileStore, rclone_flag: Option<&Path>) -> synctr_engine::Result<()> {
@@ -69,7 +69,7 @@ fn event_loop(
     loop {
         reap(&mut ui, store.paths())?;
         terminal
-            .draw(|frame| draw(frame, &mut ui, rclone_flag))
+            .draw(|frame| draw(frame, &mut ui, store.paths(), rclone_flag))
             .map_err(synctr_engine::Error::from)?;
         if !event::poll(Duration::from_millis(120)).map_err(synctr_engine::Error::from)? {
             continue;
@@ -235,10 +235,10 @@ fn start_profile(
     push_log(&ui.log, format!("--- {tag} {} ---", profile.name));
     let mut child = spawn_sync(paths, profile, &resolved, dry_run)?;
     if let Some(out) = child.stdout.take() {
-        spawn_pipe_reader(out, ui.log.clone());
+        spawn_pipe_reader(out, ui.log.clone(), paths.clone(), profile.name.clone());
     }
     if let Some(err) = child.stderr.take() {
-        spawn_pipe_reader(err, ui.log.clone());
+        spawn_pipe_reader(err, ui.log.clone(), paths.clone(), profile.name.clone());
     }
     ui.running = Some(Running {
         name: profile.name.clone(),
@@ -280,7 +280,12 @@ fn reap(ui: &mut Ui, paths: &Paths) -> synctr_engine::Result<()> {
     Ok(())
 }
 
-fn spawn_pipe_reader<R: Read + Send + 'static>(reader: R, log: Arc<Mutex<Vec<String>>>) {
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    reader: R,
+    log: Arc<Mutex<Vec<String>>>,
+    paths: Paths,
+    name: String,
+) {
     thread::spawn(move || {
         let mut buf = BufReader::new(reader);
         let mut line = String::new();
@@ -291,6 +296,7 @@ fn spawn_pipe_reader<R: Read + Send + 'static>(reader: R, log: Arc<Mutex<Vec<Str
                 Ok(_) => {
                     let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
                     if !trimmed.is_empty() {
+                        let _ = apply_rclone_log_line(&paths, &name, &trimmed);
                         push_log(&log, trimmed);
                     }
                 }
@@ -311,7 +317,7 @@ fn push_log(log: &Mutex<Vec<String>>, line: String) {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>) {
+fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, paths: &Paths, rclone_flag: Option<&Path>) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -346,7 +352,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>)
         &mut ui.state,
     );
 
-    frame.render_widget(detail_pane(ui, rclone_flag), top[1]);
+    frame.render_widget(detail_pane(ui, paths, rclone_flag), top[1]);
     ui.log_height = root[1].height.saturating_sub(2) as usize;
     frame.render_widget(log_pane(ui, root[1].height), root[1]);
     frame.render_widget(
@@ -381,7 +387,7 @@ fn help_pane() -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
 }
 
-fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
+fn detail_pane(ui: &Ui, paths: &Paths, rclone_flag: Option<&Path>) -> Paragraph<'static> {
     let block = Block::default().borders(Borders::ALL).title("state");
     let Some(i) = ui.state.selected() else {
         return Paragraph::new(
@@ -413,9 +419,16 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
         None => "never".into(),
     };
     let state = if is_running(ui, &p.name) {
-        "running"
+        match read_inflight(paths, &p.name)
+            .ok()
+            .flatten()
+            .and_then(|i| i.progress)
+        {
+            Some(progress) => format!("running  {}", progress.short_line()),
+            None => "running".into(),
+        }
     } else {
-        "idle"
+        "idle".into()
     };
     let text = vec![
         Line::from(Span::styled(

@@ -494,13 +494,21 @@ fn status_cmd(
         return Ok(ExitCode::SUCCESS);
     }
     for p in snap.profiles {
+        let last = if p.running {
+            match p.progress {
+                Some(progress) => format!("running {}", progress.short_line()),
+                None => "running".into(),
+            }
+        } else {
+            last_run_short(p.last_run.as_ref())
+        };
         println!(
             "{}\t{}\t{}\t->\t{}\t{}",
             p.name,
             p.mode,
             p.local.display(),
             p.remote,
-            last_run_short(p.last_run.as_ref())
+            last
         );
     }
     Ok(ExitCode::SUCCESS)

@@ -1,13 +1,16 @@
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread;
 
 use crate::error::Result;
 use crate::ignore::load_filters;
 use crate::lock::{try_lock_profile, ProfileLock};
 use crate::paths::Paths;
 use crate::profile::Profile;
+use crate::progress::{clear_inflight, tee_rclone_stderr, write_inflight, Inflight};
 use crate::rclone::{resolve_rclone_live, ResolvedRclone};
 use crate::status::{write_last_run, LastRun};
 
@@ -54,6 +57,8 @@ pub fn build_sync_argv(
         filter_file.as_os_str().to_os_string(),
         "--verbose".into(),
         "--use-json-log".into(),
+        "--stats".into(),
+        "1s".into(),
     ];
     for flag in &profile.extra_flags {
         args.push(flag.into());
@@ -81,6 +86,14 @@ pub fn prepare_filter_file(paths: &Paths, profile: &Profile) -> Result<PathBuf> 
 pub struct SyncChild {
     pub child: Child,
     _lock: ProfileLock,
+    paths: Paths,
+    name: String,
+}
+
+impl Drop for SyncChild {
+    fn drop(&mut self) {
+        let _ = clear_inflight(&self.paths, &self.name);
+    }
 }
 
 impl std::ops::Deref for SyncChild {
@@ -103,16 +116,25 @@ pub fn spawn_sync(
     dry_run: bool,
 ) -> Result<SyncChild> {
     let _lock = try_lock_profile(paths, &profile.name)?;
+    write_inflight(paths, &profile.name, &Inflight::start(dry_run))?;
     let filter = prepare_filter_file(paths, profile)?;
     let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(SyncChild {
-        child: cmd.spawn()?,
-        _lock,
-    })
+    match cmd.spawn() {
+        Ok(child) => Ok(SyncChild {
+            child,
+            _lock,
+            paths: paths.clone(),
+            name: profile.name.clone(),
+        }),
+        Err(e) => {
+            let _ = clear_inflight(paths, &profile.name);
+            Err(e.into())
+        }
+    }
 }
 
 pub fn run_sync(
@@ -134,33 +156,60 @@ pub fn execute_sync(
     dry_run: bool,
 ) -> Result<SyncOutcome> {
     let _lock = try_lock_profile(paths, &profile.name)?;
+    write_inflight(paths, &profile.name, &Inflight::start(dry_run))?;
+    let result = execute_sync_locked(paths, profile, resolved, inherit_stdio, dry_run);
+    let _ = clear_inflight(paths, &profile.name);
+    result
+}
+
+fn execute_sync_locked(
+    paths: &Paths,
+    profile: &Profile,
+    resolved: ResolvedRclone,
+    inherit_stdio: bool,
+    dry_run: bool,
+) -> Result<SyncOutcome> {
     let filter = prepare_filter_file(paths, profile)?;
     let argv = build_sync_argv(&resolved.path, profile, &filter, dry_run);
     let mut cmd = argv.command();
+    cmd.stdin(Stdio::null());
     if inherit_stdio {
-        cmd.stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        let status = cmd.status()?;
-        let exit_code = status.code().unwrap_or(1);
-        write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
-        Ok(SyncOutcome {
-            exit_code,
-            rclone: resolved,
-            stdout: None,
-            stderr: None,
-        })
+        cmd.stdout(Stdio::inherit());
     } else {
-        let output = cmd.output()?;
-        let exit_code = output.status.code().unwrap_or(1);
-        write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
-        Ok(SyncOutcome {
-            exit_code,
-            rclone: resolved,
-            stdout: Some(output.stdout),
-            stderr: Some(output.stderr),
-        })
+        cmd.stdout(Stdio::piped());
     }
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let stderr = child.stderr.take();
+    let stdout_thread = child.stdout.take().map(|mut pipe| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let paths_err = paths.clone();
+    let name = profile.name.clone();
+    let stderr_thread = stderr.map(move |err| {
+        thread::spawn(move || tee_rclone_stderr(&paths_err, &name, err, inherit_stdio))
+    });
+    let status = child.wait()?;
+    if let Some(t) = stderr_thread {
+        match t.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {}
+        }
+    }
+    let stdout = stdout_thread.and_then(|t| t.join().ok());
+    let exit_code = status.code().unwrap_or(1);
+    write_last_run(paths, &profile.name, LastRun::now(exit_code))?;
+    Ok(SyncOutcome {
+        exit_code,
+        rclone: resolved,
+        stdout,
+        stderr: None,
+    })
 }
 
 #[cfg(test)]
@@ -200,6 +249,8 @@ mod tests {
                 "/tmp/docs.filter",
                 "--verbose",
                 "--use-json-log",
+                "--stats",
+                "1s",
                 "--checksum",
             ]
         );
@@ -339,5 +390,57 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn execute_sync_parses_json_log_into_inflight_then_clears() {
+        let (root, paths) = scratch("runner-progress");
+        let bin = write_exec(
+            &root,
+            "rclone",
+            r#"#!/bin/sh
+echo '{"stats":{"bytes":50,"totalBytes":200,"eta":4,"speed":10,"transferring":[{"name":"a.bin","percentage":25}]}}' >&2
+sleep 2
+exit 0
+"#,
+        );
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:x".into(),
+            Mode::Copy,
+            Some(bin.clone()),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let resolved = ResolvedRclone {
+            path: bin,
+            source: ResolveSource::Profile,
+        };
+        let paths_thread = paths.clone();
+        let profile_thread = profile.clone();
+        let handle = std::thread::spawn(move || {
+            execute_sync(&paths_thread, &profile_thread, resolved, false, false)
+        });
+        let start = std::time::Instant::now();
+        let mut saw = false;
+        while start.elapsed() < std::time::Duration::from_secs(3) {
+            if let Ok(Some(inf)) = crate::progress::read_inflight(&paths, "docs") {
+                if inf.progress.as_ref().is_some_and(|p| p.bytes == 50) {
+                    saw = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let outcome = handle.join().unwrap().unwrap();
+        assert!(saw, "inflight progress never appeared");
+        assert_eq!(outcome.exit_code, 0);
+        assert!(crate::progress::read_inflight(&paths, "docs")
+            .unwrap()
+            .is_none());
     }
 }

@@ -899,3 +899,88 @@ fn watch_preflights_rclone_before_printing_watching() {
         "must fail before the watching banner; out={combined}"
     );
 }
+
+#[test]
+fn status_json_shows_live_progress_of_running_sync() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let fake = root.join("rclone");
+    fs::write(
+        &fake,
+        r#"#!/bin/sh
+echo '{"level":"info","stats":{"bytes":80,"totalBytes":400,"eta":7,"speed":20,"transferring":[{"name":"x.bin","percentage":20}]}}' >&2
+sleep 8
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = fs::metadata(&fake).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&fake, p).unwrap();
+    }
+    add_docs(&root, &local, Some(&fake));
+
+    let mut child = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "docs",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut guard = Kill(child);
+
+    let start = Instant::now();
+    let mut seen: Option<serde_json::Value> = None;
+    while start.elapsed() < Duration::from_secs(6) {
+        let out = isolated(&root)
+            .args([
+                "--config-dir",
+                root.to_str().unwrap(),
+                "--rclone",
+                fake.to_str().unwrap(),
+                "--json",
+                "status",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_status_json_contract(&v);
+        if v["profiles"][0]["running"] == true
+            && v["profiles"][0]["progress"]["bytes"] == 80
+        {
+            seen = Some(v);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
+    let v = seen.expect("status --json never showed running progress");
+    assert_eq!(v["profiles"][0]["name"], "docs");
+    assert_eq!(v["profiles"][0]["progress"]["percent"], 20);
+    assert!(v["rclone"].get("found").is_some());
+}

@@ -118,6 +118,8 @@ synctr status --json
 
 `last_run` is omitted when the profile has never run. `rclone.path` / `source` / `detail` are omitted when rclone is missing.
 
+When a sync is in flight (CLI, watch, TUI, or a scheduled `synctr sync`), the same object may also include `"running": true` and `progress` (`bytes`, optional `total_bytes` / `percent` / `eta_secs` / `speed_bps` / `name`). Those keys are **omitted when idle**. Existing Noctalia fields are unchanged.
+
 The Noctalia widget lives at `contrib/noctalia/synctr` and shells that command. A real Mac menu bar extra is not in this release. `contrib/menubar/` is a sketch that parses the same JSON.
 
 ## Other commands
@@ -176,7 +178,7 @@ More patterns, gitignore syntax, from:
 
 GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway.
 
-`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, and `--use-json-log`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's.
+`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, `--use-json-log`, and `--stats 1s`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's. JSON log `stats` objects are parsed into live `progress` for `status --json` and the TUI.
 
 ## Config
 

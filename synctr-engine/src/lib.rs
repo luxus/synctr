@@ -3,6 +3,7 @@ mod ignore;
 mod lock;
 mod paths;
 mod profile;
+mod progress;
 mod rclone;
 mod runner;
 mod schedule;
@@ -11,9 +12,13 @@ mod watch;
 
 pub use error::{Error, Result};
 pub use ignore::{load_filters, FilterRule, FilterSet, DEFAULT_PATTERNS};
-pub use lock::{try_lock_profile, ProfileLock};
+pub use lock::{profile_lock_held, try_lock_profile, ProfileLock};
 pub use paths::{make_absolute, Paths};
 pub use profile::{validate_name, Mode, Profile, ProfileEdit, ProfileStore};
+pub use progress::{
+    apply_rclone_log_line, clear_inflight, parse_rclone_json_line, read_inflight, tee_rclone_stderr,
+    write_inflight, Inflight, TransferProgress,
+};
 pub use rclone::{
     resolve_rclone, resolve_rclone_live, well_known, FsProbe, RealFs, ResolveRequest,
     ResolveSource, ResolvedRclone,
