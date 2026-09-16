@@ -49,6 +49,9 @@ enum Command {
         /// Same argv as a real run, plus rclone --dry-run (writes nothing)
         #[arg(long)]
         dry_run: bool,
+        /// rclone --resync (bisync only). First pass on a new bisync profile.
+        #[arg(long)]
+        resync: bool,
     },
     /// Sync when files under the profile's local directory change
     Watch {
@@ -214,15 +217,26 @@ fn try_main() -> synctr_engine::Result<ExitCode> {
             profile_cmd(&store, cli.json, command)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Sync { name, dry_run } => {
+        Command::Sync {
+            name,
+            dry_run,
+            resync,
+        } => {
             let profile = store.get(&name)?;
             profile.require_enabled()?;
+            if resync && profile.mode != Mode::Bisync {
+                return Err(synctr_engine::Error::ResyncNotBisync(
+                    profile.name,
+                    profile.mode.as_str(),
+                ));
+            }
             let outcome = synctr_engine::run_sync(
                 store.paths(),
                 &profile,
                 cli.rclone.as_deref(),
                 true,
                 dry_run,
+                resync,
             )?;
             Ok(ExitCode::from(outcome.exit_code as u8))
         }

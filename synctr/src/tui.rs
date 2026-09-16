@@ -241,7 +241,7 @@ fn start_profile(
         profile.mode.as_str()
     };
     push_log(&ui.log, format!("--- {tag} {} ---", profile.name));
-    let mut child = spawn_sync(paths, profile, &resolved, dry_run)?;
+    let mut child = spawn_sync(paths, profile, &resolved, dry_run, false)?;
     let progress = child.progress.clone();
     if let Some(out) = child.stdout.take() {
         spawn_pipe_reader(out, ui.log.clone(), progress.clone());

@@ -47,6 +47,7 @@ fn assert_recorded_argv_matches_engine(
     rclone: &Path,
     profile_name: &str,
     dry_run: bool,
+    resync: bool,
 ) {
     let profile = store_for(root).get(profile_name).unwrap();
     let filter_idx = recorded
@@ -54,7 +55,7 @@ fn assert_recorded_argv_matches_engine(
         .position(|a| a == "--filter-from")
         .expect("--filter-from");
     let filter_path = Path::new(&recorded[filter_idx + 1]);
-    let expected = build_sync_argv(rclone, &profile, filter_path, dry_run);
+    let expected = build_sync_argv(rclone, &profile, filter_path, dry_run, resync);
     assert_eq!(recorded[0], rclone.to_str().unwrap());
     assert_eq!(&recorded[1..], expected.args_lossy().as_slice());
     let filters = load_filters(&paths_for(root), &profile).unwrap();
@@ -601,7 +602,7 @@ fn sync_dry_run_and_filter_from_use_stub_argv() {
     );
     let line = fs::read_to_string(&log).unwrap();
     let args = parse_stub_line(line.trim());
-    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", true);
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", true, false);
     let filter = fs::read_to_string(paths_for(&root).filter_file("docs")).unwrap();
     assert!(filter.contains("- node_modules/**"));
     assert!(filter.contains("- .git/**"));
@@ -625,7 +626,98 @@ fn sync_dry_run_and_filter_from_use_stub_argv() {
         .unwrap();
     assert!(real.status.success());
     let args = parse_stub_line(fs::read_to_string(&log).unwrap().trim());
-    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false);
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false, false);
+}
+
+#[test]
+fn sync_resync_is_bisync_only_and_matches_engine_argv() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let fake = stub_rclone(&root);
+    add_docs(&root, &local, Some(&fake));
+    let log = root.join("stub.log");
+
+    let rejected = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "docs",
+            "--resync",
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let err = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        err.contains("bisync") && err.contains("resync"),
+        "stderr={err}"
+    );
+    assert!(
+        !log.exists() || fs::read_to_string(&log).unwrap().trim().is_empty(),
+        "rclone must not start when --resync is rejected"
+    );
+
+    let add = isolated(&root)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "add",
+            "notes",
+            "--local",
+            local.to_str().unwrap(),
+            "--remote",
+            "b2:bucket/notes",
+            "--mode",
+            "bisync",
+            "--rclone",
+            fake.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let out = isolated(&root)
+        .env("SYNCTR_STUB_LOG", &log)
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "notes",
+            "--resync",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let args = parse_stub_line(fs::read_to_string(&log).unwrap().trim());
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "notes", false, true);
+    assert!(args.iter().any(|a| a == "--resync"));
+    assert_eq!(args.get(1).map(String::as_str), Some("bisync"));
+    assert!(paths_for(&root).last_run("notes").is_file());
+}
+
+#[test]
+fn sync_help_lists_resync() {
+    let out = bin().args(["sync", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--resync"));
+    assert!(text.contains("--dry-run"));
 }
 
 #[test]
@@ -1050,7 +1142,7 @@ fn watch_runs_sync_after_temp_dir_change() {
         local.display()
     );
     let args = parse_stub_line(fs::read_to_string(&log).unwrap().lines().next().unwrap());
-    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false);
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false, false);
 }
 
 #[test]
