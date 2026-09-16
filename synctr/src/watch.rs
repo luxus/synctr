@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{event::ModifyKind, Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use synctr_engine::{
     load_filters, path_should_wake, run_sync, Debouncer, Error, ProfileStore, Result,
 };
@@ -21,36 +21,45 @@ pub fn run(
             format!("local directory missing: {}", profile.local.display()),
         )));
     }
+    // Canonicalize so notify events (often real paths) strip against the same root.
+    // macOS /tmp → /private/tmp is the usual mismatch.
+    let local = profile
+        .local
+        .canonicalize()
+        .unwrap_or_else(|_| profile.local.clone());
     let filters = load_filters(store.paths(), &profile)?;
     let (tx, rx) = mpsc::channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())
         .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
     watcher
-        .watch(&profile.local, RecursiveMode::Recursive)
+        .watch(&local, RecursiveMode::Recursive)
         .map_err(|e| Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
     let wait = Duration::from_millis(debounce_ms.max(1));
     let mut debounce = Debouncer::new(wait);
     eprintln!(
         "watching {} -> {} (debounce {}ms). Ctrl-C stops. TUI Enter-to-run is unchanged.",
-        profile.local.display(),
+        local.display(),
         profile.remote,
         wait.as_millis()
     );
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(Ok(event)) => {
-                if matches!(event.kind, EventKind::Access(_)) {
+                if !event_kind_is_content_change(event.kind) {
                     continue;
                 }
                 for path in event.paths {
-                    if path_should_wake(&filters, &profile.local, &path) {
+                    if path_should_wake(&filters, &local, &path) {
                         debounce.poke(Instant::now());
                         break;
                     }
                 }
             }
             Ok(Err(e)) => {
-                return Err(Error::Io(io::Error::new(io::ErrorKind::Other, e.to_string())));
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::Other,
+                    e.to_string(),
+                )));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -64,4 +73,39 @@ pub fn run(
         }
     }
     Ok(())
+}
+
+fn event_kind_is_content_change(kind: EventKind) -> bool {
+    // Access (including close-write on some backends) and metadata-only
+    // events (atime/chmod) are the usual watch false-positives. Create,
+    // data modify, rename, and remove still wake.
+    !matches!(
+        kind,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_))
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, DataChange, MetadataKind};
+
+    #[test]
+    fn access_and_metadata_do_not_count_as_content_changes() {
+        assert!(!event_kind_is_content_change(EventKind::Access(
+            AccessKind::Any
+        )));
+        assert!(!event_kind_is_content_change(EventKind::Modify(
+            ModifyKind::Metadata(MetadataKind::WriteTime)
+        )));
+        assert!(event_kind_is_content_change(EventKind::Modify(
+            ModifyKind::Data(DataChange::Content)
+        )));
+        assert!(event_kind_is_content_change(EventKind::Create(
+            notify::event::CreateKind::File
+        )));
+        assert!(event_kind_is_content_change(EventKind::Remove(
+            notify::event::RemoveKind::File
+        )));
+    }
 }
