@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Mac menu bar extra in `contrib/menubar/`: SwiftUI `MenuBarExtra` that polls `synctr status --json`, shows rclone found/missing and each `last_run.ok`, and starts/stops with `synctr sync <name>`. Build on macOS (`xcodebuild`). `status-poll.sh` remains the Linux JSON consumer check. Notarization, login items, and File Provider stay parked (#45).
+
 ## 0.1.0 - 2026-08-30
 
 First release. Tag it `v0.1.0`. Cargo.toml is already `0.1.0`.
