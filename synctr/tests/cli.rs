@@ -4,6 +4,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use synctr_engine::{
+    assert_status_json_contract, build_sync_argv, load_filters, status_json, status_snapshot,
+    Paths, ProfileStore, StatusSnapshot,
+};
+
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn bin() -> Command {
@@ -26,6 +31,37 @@ fn isolated(home: &Path) -> Command {
     c.env("XDG_CACHE_HOME", home.join(".cache"));
     c.env_remove("SYNCTR_RCLONE");
     c
+}
+
+fn paths_for(root: &Path) -> Paths {
+    Paths::from_config_dir(root.to_path_buf())
+}
+
+fn store_for(root: &Path) -> ProfileStore {
+    ProfileStore::new(paths_for(root))
+}
+
+fn assert_recorded_argv_matches_engine(
+    root: &Path,
+    recorded: &[String],
+    rclone: &Path,
+    profile_name: &str,
+    dry_run: bool,
+) {
+    let profile = store_for(root).get(profile_name).unwrap();
+    let filter_idx = recorded
+        .iter()
+        .position(|a| a == "--filter-from")
+        .expect("--filter-from");
+    let filter_path = Path::new(&recorded[filter_idx + 1]);
+    let expected = build_sync_argv(rclone, &profile, filter_path, dry_run);
+    assert_eq!(recorded[0], rclone.to_str().unwrap());
+    assert_eq!(&recorded[1..], expected.args_lossy().as_slice());
+    let filters = load_filters(&paths_for(root), &profile).unwrap();
+    assert_eq!(
+        fs::read_to_string(filter_path).unwrap(),
+        filters.to_filter_from()
+    );
 }
 
 fn stub_rclone(dir: &Path) -> PathBuf {
@@ -74,27 +110,6 @@ fn add_docs(home: &Path, local: &Path, rclone: Option<&Path>) {
 
 fn parse_stub_line(line: &str) -> Vec<String> {
     line.split('\t').map(str::to_string).collect()
-}
-
-fn assert_status_schema(v: &serde_json::Value) {
-    let rclone = v.get("rclone").expect("rclone");
-    assert!(rclone.get("found").and_then(|x| x.as_bool()).is_some());
-    let profiles = v
-        .get("profiles")
-        .and_then(|p| p.as_array())
-        .expect("profiles array");
-    for p in profiles {
-        for key in ["name", "local", "remote", "mode", "extra_flags", "extra_ignore"] {
-            assert!(p.get(key).is_some(), "missing profile.{key}");
-        }
-        if let Some(last) = p.get("last_run") {
-            if !last.is_null() {
-                for key in ["finished_at_unix", "finished_at", "exit_code", "ok"] {
-                    assert!(last.get(key).is_some(), "missing last_run.{key}");
-                }
-            }
-        }
-    }
 }
 
 #[test]
@@ -149,7 +164,13 @@ fn profile_add_list_show_remove_and_json() {
     );
 
     let list = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "--json", "profile", "list"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "profile",
+            "list",
+        ])
         .output()
         .unwrap();
     assert!(list.status.success());
@@ -159,7 +180,13 @@ fn profile_add_list_show_remove_and_json() {
     assert_eq!(v["profiles"][0]["mode"], "sync");
 
     let show = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "profile", "show", "docs"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "show",
+            "docs",
+        ])
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&show.stdout);
@@ -174,10 +201,16 @@ fn profile_add_list_show_remove_and_json() {
     let v: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(v["profiles"][0]["name"], "docs");
     assert!(v["rclone"].is_object());
-    assert_status_schema(&v);
+    assert_status_json_contract(&v);
 
     let rm = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "profile", "remove", "docs"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "remove",
+            "docs",
+        ])
         .output()
         .unwrap();
     assert!(rm.status.success());
@@ -193,12 +226,7 @@ fn which_rclone_json_with_explicit_binary() {
     let root = scratch();
     let fake = stub_rclone(&root);
     let out = isolated(&root)
-        .args([
-            "--rclone",
-            fake.to_str().unwrap(),
-            "--json",
-            "which-rclone",
-        ])
+        .args(["--rclone", fake.to_str().unwrap(), "--json", "which-rclone"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -256,7 +284,12 @@ fn which_rclone_order_flag_then_env_then_path() {
     let flag = isolated(&root)
         .env("SYNCTR_RCLONE", &env_bin)
         .env("PATH", path_dir.to_str().unwrap())
-        .args(["--rclone", flag_bin.to_str().unwrap(), "--json", "which-rclone"])
+        .args([
+            "--rclone",
+            flag_bin.to_str().unwrap(),
+            "--json",
+            "which-rclone",
+        ])
         .output()
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&flag.stdout).unwrap();
@@ -289,7 +322,13 @@ fn profile_edit_and_rename_are_in_place() {
     add_docs(&root, Path::new("/tmp/docs"), None);
 
     let empty = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "profile", "edit", "docs"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "edit",
+            "docs",
+        ])
         .output()
         .unwrap();
     assert!(!empty.status.success());
@@ -338,7 +377,13 @@ fn profile_edit_and_rename_are_in_place() {
     assert!(!root.join("profiles/docs.toml").exists());
     assert!(root.join("profiles/notes.toml").is_file());
     let show = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "profile", "show", "notes"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "profile",
+            "show",
+            "notes",
+        ])
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&show.stdout).contains("b2:bucket/other"));
@@ -373,15 +418,8 @@ fn sync_dry_run_and_filter_from_use_stub_argv() {
     );
     let line = fs::read_to_string(&log).unwrap();
     let args = parse_stub_line(line.trim());
-    assert_eq!(args[1], "sync");
-    assert_eq!(args[2], local.to_str().unwrap());
-    assert_eq!(args[3], "b2:bucket/docs");
-    assert!(args.contains(&"--dry-run".to_string()));
-    assert!(args.contains(&"--filter-from".to_string()));
-    assert!(args.contains(&"--checksum".to_string()));
-    let filter_idx = args.iter().position(|a| a == "--filter-from").unwrap();
-    let filter_path = &args[filter_idx + 1];
-    let filter = fs::read_to_string(filter_path).unwrap();
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", true);
+    let filter = fs::read_to_string(paths_for(&root).filter_file("docs")).unwrap();
     assert!(filter.contains("- node_modules/**"));
     assert!(filter.contains("- .git/**"));
     assert!(filter.contains("- target/**"));
@@ -404,21 +442,37 @@ fn sync_dry_run_and_filter_from_use_stub_argv() {
         .unwrap();
     assert!(real.status.success());
     let args = parse_stub_line(fs::read_to_string(&log).unwrap().trim());
-    assert!(!args.contains(&"--dry-run".to_string()));
-    assert_eq!(args[1], "sync");
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false);
 }
 
 #[test]
 fn status_json_matches_noctalia_plugin_fields() {
     let root = scratch();
     add_docs(&root, Path::new("/tmp/docs"), None);
+    let fake = stub_rclone(&root);
     let out = isolated(&root)
-        .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "--json",
+            "status",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
+    let snap = status_snapshot(&store_for(&root), Some(&fake), None).unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout.clone()).unwrap(),
+        status_json(&snap).unwrap()
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_status_schema(&v);
+    assert_status_json_contract(&v);
+    let parsed: StatusSnapshot = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed.profiles[0].name, "docs");
+    assert!(parsed.profiles[0].last_run.is_none());
+    assert_eq!(parsed.rclone.path.as_deref(), Some(fake.as_path()));
 
     let plugin = include_str!("../../contrib/noctalia/synctr/widget.luau");
     assert!(plugin.contains("synctr status --json"));
@@ -609,6 +663,5 @@ fn watch_runs_sync_after_temp_dir_change() {
         local.display()
     );
     let args = parse_stub_line(fs::read_to_string(&log).unwrap().lines().next().unwrap());
-    assert!(!args.contains(&"--dry-run".to_string()));
-    assert!(args.contains(&"--filter-from".to_string()));
+    assert_recorded_argv_matches_engine(&root, &args, &fake, "docs", false);
 }

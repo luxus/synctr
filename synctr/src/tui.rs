@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -17,8 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use synctr_engine::{
-    read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths, Profile,
-    ProfileStore, ResolvedRclone,
+    age_label, read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths,
+    Profile, ProfileStore, RcloneJson, ResolvedRclone,
 };
 
 pub fn run(store: &ProfileStore, rclone_flag: Option<&Path>) -> synctr_engine::Result<()> {
@@ -161,7 +161,8 @@ fn move_sel(ui: &mut Ui, delta: i32) {
         return;
     }
     let cur = ui.state.selected().unwrap_or(0) as i32;
-    ui.state.select(Some((cur + delta).rem_euclid(len) as usize));
+    ui.state
+        .select(Some((cur + delta).rem_euclid(len) as usize));
 }
 
 fn log_window(len: usize, height: usize, offset: usize) -> (usize, usize) {
@@ -227,7 +228,11 @@ fn start_profile(
     resolved: ResolvedRclone,
     dry_run: bool,
 ) -> synctr_engine::Result<()> {
-    let tag = if dry_run { "dry-run" } else { profile.mode.as_str() };
+    let tag = if dry_run {
+        "dry-run"
+    } else {
+        profile.mode.as_str()
+    };
     push_log(&ui.log, format!("--- {tag} {} ---", profile.name));
     let mut child = spawn_sync(paths, profile, &resolved, dry_run)?;
     if let Some(out) = child.stdout.take() {
@@ -260,7 +265,10 @@ fn reap(ui: &mut Ui, paths: &Paths) -> synctr_engine::Result<()> {
         let Some(running) = ui.running.as_mut() else {
             return Ok(());
         };
-        running.child.try_wait().map_err(synctr_engine::Error::from)?
+        running
+            .child
+            .try_wait()
+            .map_err(synctr_engine::Error::from)?
     };
     let Some(status) = status else {
         return Ok(());
@@ -377,21 +385,26 @@ fn help_pane() -> Paragraph<'static> {
 fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
     let block = Block::default().borders(Borders::ALL).title("state");
     let Some(i) = ui.state.selected() else {
-        return Paragraph::new("no profiles. synctr profile add <name> --local PATH --remote remote:path --mode sync")
-            .block(block)
-            .wrap(Wrap { trim: true });
+        return Paragraph::new(
+            "no profiles. synctr profile add <name> --local PATH --remote remote:path --mode sync",
+        )
+        .block(block)
+        .wrap(Wrap { trim: true });
     };
     let Some(row) = ui.rows.get(i) else {
         return Paragraph::new("").block(block);
     };
     let p = &row.profile;
-    let rclone = match resolve_rclone_live(rclone_flag, p.rclone.as_deref()) {
-        Ok(r) => format!("{} ({})", r.path.display(), r.source.explain()),
-        Err(synctr_engine::Error::RcloneNotFound) => "not found".into(),
+    let rclone = match RcloneJson::from_live(rclone_flag, p.rclone.as_deref()) {
+        Ok(j) => j.human_line(),
         Err(e) => e.to_string(),
     };
     let last = match &row.last {
-        Some(run) if run.ok => format!("ok {} ({})", age_label(run.finished_at_unix), run.finished_at),
+        Some(run) if run.ok => format!(
+            "ok {} ({})",
+            age_label(run.finished_at_unix),
+            run.finished_at
+        ),
         Some(run) => format!(
             "exit {} {} ({})",
             run.exit_code,
@@ -406,7 +419,10 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
         "idle"
     };
     let text = vec![
-        Line::from(Span::styled(p.name.clone(), Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            p.name.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(format!("mode    {}", p.mode)),
         Line::from(format!("local   {}", p.local.display())),
         Line::from(format!("remote  {}", p.remote)),
@@ -414,9 +430,7 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
         Line::from(format!("last    {last}")),
         Line::from(format!("state   {state}")),
     ];
-    Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: true })
+    Paragraph::new(text).block(block).wrap(Wrap { trim: true })
 }
 
 fn log_pane(ui: &Ui, height: u16) -> Paragraph<'static> {
@@ -439,23 +453,6 @@ fn log_pane(ui: &Ui, height: u16) -> Paragraph<'static> {
     Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(title))
         .wrap(Wrap { trim: false })
-}
-
-fn age_label(unix: i64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let d = (now - unix).max(0);
-    if d < 60 {
-        format!("{d}s ago")
-    } else if d < 3600 {
-        format!("{}m ago", d / 60)
-    } else if d < 86400 {
-        format!("{}h ago", d / 3600)
-    } else {
-        format!("{}d ago", d / 86400)
-    }
 }
 
 #[cfg(test)]

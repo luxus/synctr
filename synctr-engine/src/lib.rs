@@ -17,15 +17,15 @@ pub use rclone::{
     ResolveSource, ResolvedRclone,
 };
 pub use runner::{
-    build_sync_argv, execute_sync, prepare_filter_file, run_sync, spawn_sync, SyncArgv,
-    SyncOutcome,
+    build_sync_argv, execute_sync, prepare_filter_file, run_sync, spawn_sync, SyncArgv, SyncOutcome,
 };
 pub use schedule::{
     default_install_dir, enable_hint, generate_schedule, install_schedule, schedule_filenames,
     uninstall_schedule, ScheduleFile, ScheduleKind, ScheduleSpec,
 };
 pub use status::{
-    read_last_run, status_snapshot, write_last_run, LastRun, ProfileStatus, RcloneJson,
+    age_label, assert_status_json_contract, last_run_short, read_last_run, status_json,
+    status_snapshot, write_last_run, write_status_json, LastRun, ProfileStatus, RcloneJson,
     StatusSnapshot,
 };
 pub use watch::{path_should_wake, Debouncer};
@@ -42,12 +42,8 @@ pub(crate) mod testutil {
 
     pub fn scratch(name: &str) -> (PathBuf, Paths) {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "synctr-{}-{}-{}",
-            name,
-            std::process::id(),
-            n
-        ));
+        let root =
+            std::env::temp_dir().join(format!("synctr-{}-{}-{}", name, std::process::id(), n));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let paths = Paths::from_config_dir(root.join("config"));
