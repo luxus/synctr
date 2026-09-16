@@ -16,8 +16,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use synctr_engine::{
-    age_label, read_last_run, resolve_rclone_live, spawn_sync, write_last_run, LastRun, Paths,
-    Profile, ProfileStore, RcloneJson, ResolvedRclone, SyncChild,
+    age_label, display_rclone_line, live_progress, read_last_run, resolve_rclone_live, spawn_sync,
+    write_last_run, LastRun, Paths, Profile, ProfileStore, ProgressSink, RcloneJson,
+    ResolvedRclone, SyncChild, TransferProgress,
 };
 
 pub fn run(store: &ProfileStore, rclone_flag: Option<&Path>) -> synctr_engine::Result<()> {
@@ -69,7 +70,7 @@ fn event_loop(
     loop {
         reap(&mut ui, store.paths())?;
         terminal
-            .draw(|frame| draw(frame, &mut ui, rclone_flag))
+            .draw(|frame| draw(frame, &mut ui, rclone_flag, store.paths()))
             .map_err(synctr_engine::Error::from)?;
         if !event::poll(Duration::from_millis(120)).map_err(synctr_engine::Error::from)? {
             continue;
@@ -234,11 +235,12 @@ fn start_profile(
     };
     push_log(&ui.log, format!("--- {tag} {} ---", profile.name));
     let mut child = spawn_sync(paths, profile, &resolved, dry_run)?;
+    let progress = child.progress.clone();
     if let Some(out) = child.stdout.take() {
-        spawn_pipe_reader(out, ui.log.clone());
+        spawn_pipe_reader(out, ui.log.clone(), progress.clone());
     }
     if let Some(err) = child.stderr.take() {
-        spawn_pipe_reader(err, ui.log.clone());
+        spawn_pipe_reader(err, ui.log.clone(), progress);
     }
     ui.running = Some(Running {
         name: profile.name.clone(),
@@ -280,7 +282,11 @@ fn reap(ui: &mut Ui, paths: &Paths) -> synctr_engine::Result<()> {
     Ok(())
 }
 
-fn spawn_pipe_reader<R: Read + Send + 'static>(reader: R, log: Arc<Mutex<Vec<String>>>) {
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    reader: R,
+    log: Arc<Mutex<Vec<String>>>,
+    progress: ProgressSink,
+) {
     thread::spawn(move || {
         let mut buf = BufReader::new(reader);
         let mut line = String::new();
@@ -291,7 +297,8 @@ fn spawn_pipe_reader<R: Read + Send + 'static>(reader: R, log: Arc<Mutex<Vec<Str
                 Ok(_) => {
                     let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
                     if !trimmed.is_empty() {
-                        push_log(&log, trimmed);
+                        progress.push_line(&trimmed);
+                        push_log(&log, display_rclone_line(&trimmed));
                     }
                 }
                 Err(_) => break,
@@ -311,11 +318,11 @@ fn push_log(log: &Mutex<Vec<String>>, line: String) {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>) {
+fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>, paths: &Paths) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(6),
+            Constraint::Min(8),
             Constraint::Length(8),
             Constraint::Length(1),
         ])
@@ -329,11 +336,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>)
         .rows
         .iter()
         .map(|row| {
-            let mark = if is_running(ui, &row.profile.name) {
-                " running"
-            } else {
-                ""
-            };
+            let mark = running_mark(ui, paths, &row.profile.name);
             ListItem::new(format!("{}{mark}", row.profile.name))
         })
         .collect();
@@ -346,7 +349,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, ui: &mut Ui, rclone_flag: Option<&Path>)
         &mut ui.state,
     );
 
-    frame.render_widget(detail_pane(ui, rclone_flag), top[1]);
+    frame.render_widget(detail_pane(ui, rclone_flag, paths), top[1]);
     ui.log_height = root[1].height.saturating_sub(2) as usize;
     frame.render_widget(log_pane(ui, root[1].height), root[1]);
     frame.render_widget(
@@ -374,6 +377,7 @@ fn help_pane() -> Paragraph<'static> {
         Line::from("q / esc   quit"),
         Line::from(""),
         Line::from("one rclone child at a time. Enter on another profile stops the current one."),
+        Line::from("state pane shows live rclone transfer progress (bytes, %, ETA, file)."),
         Line::from("directory watch is `synctr watch`, not this TUI."),
     ];
     Paragraph::new(text)
@@ -381,7 +385,23 @@ fn help_pane() -> Paragraph<'static> {
         .wrap(Wrap { trim: false })
 }
 
-fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
+fn running_mark(ui: &Ui, paths: &Paths, name: &str) -> String {
+    match live_progress(paths, name).or_else(|| {
+        if is_running(ui, name) {
+            Some(TransferProgress::starting(None, false))
+        } else {
+            None
+        }
+    }) {
+        Some(p) => match p.percent {
+            Some(pct) => format!(" running {pct}%"),
+            None => " running".into(),
+        },
+        None => String::new(),
+    }
+}
+
+fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>, paths: &Paths) -> Paragraph<'static> {
     let block = Block::default().borders(Borders::ALL).title("state");
     let Some(i) = ui.state.selected() else {
         return Paragraph::new(
@@ -412,12 +432,13 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
         ),
         None => "never".into(),
     };
-    let state = if is_running(ui, &p.name) {
+    let xfer = live_progress(paths, &p.name);
+    let state = if xfer.is_some() || is_running(ui, &p.name) {
         "running"
     } else {
         "idle"
     };
-    let text = vec![
+    let mut text = vec![
         Line::from(Span::styled(
             p.name.clone(),
             Style::default().add_modifier(Modifier::BOLD),
@@ -429,6 +450,12 @@ fn detail_pane(ui: &Ui, rclone_flag: Option<&Path>) -> Paragraph<'static> {
         Line::from(format!("last    {last}")),
         Line::from(format!("state   {state}")),
     ];
+    if let Some(xfer) = xfer {
+        text.push(Line::from(format!("xfer    {}", xfer.summary())));
+        if let Some(file) = xfer.file {
+            text.push(Line::from(format!("file    {file}")));
+        }
+    }
     Paragraph::new(text).block(block).wrap(Wrap { trim: true })
 }
 

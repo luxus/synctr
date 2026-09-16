@@ -72,7 +72,7 @@ Modes on `profile add` / `profile edit`: `copy`, `sync`, `bisync`. `synctr sync 
 
 ## TUI keys
 
-Left pane is profiles, right is last run / rclone path / state, bottom is the rclone log.
+Left pane is profiles, right is last run / rclone path / state (including live transfer progress while rclone is running), bottom is the rclone log.
 
 | Key | Action |
 | --- | --- |
@@ -117,6 +117,29 @@ synctr status --json
 ```
 
 `last_run` is omitted when the profile has never run. `rclone.path` / `source` / `detail` are omitted when rclone is missing.
+
+While rclone is transferring, each profile may also include additive `progress` (omitted when idle). Do not remove or rename the Noctalia fields above. `progress` is present only while a synctr rclone child holds that profile's lock:
+
+```
+      "progress": {
+        "bytes": 1234,
+        "total_bytes": 5678,
+        "percent": 21,
+        "speed_bps": 100000,
+        "eta_secs": 45,
+        "transfers": 3,
+        "total_transfers": 10,
+        "file": "notes.txt",
+        "pid": 12345,
+        "dry_run": false,
+        "updated_at_unix": 0,
+        "updated_at": "1970-01-01T00:00:00Z"
+      }
+```
+
+`percent`, `speed_bps`, `eta_secs`, `file`, and `pid` are omitted when rclone has not reported them yet. A leftover progress file after a crash is ignored unless the lock is still held.
+
+The TUI state pane shows the same numbers (bar, bytes, speed, ETA, current file). synctr parses rclone `--use-json-log` stats (argv also passes `--stats 1s`).
 
 The Noctalia widget lives at `contrib/noctalia/synctr` and shells that command. A real Mac menu bar extra is not in this release. `contrib/menubar/` is a sketch that parses the same JSON.
 
@@ -176,7 +199,7 @@ More patterns, gitignore syntax, from:
 
 GUI-less sessions often have a short `PATH`. The nix and Homebrew paths are searched anyway.
 
-`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, and `--use-json-log`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's.
+`synctr sync` builds argv as separate arguments (no shell). It always passes `--filter-from`, `--verbose`, `--use-json-log`, and `--stats 1s`, then the profile's extra flags, then `--dry-run` when requested. Exit status is rclone's. JSON stats lines are parsed into live `progress` on `status --json`.
 
 ## Config
 

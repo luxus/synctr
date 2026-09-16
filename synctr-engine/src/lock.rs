@@ -26,6 +26,19 @@ pub fn try_lock_profile(paths: &Paths, name: &str) -> Result<ProfileLock> {
     Ok(ProfileLock { _file: file })
 }
 
+/// True when another synctr process holds the exclusive per-profile lock.
+/// Opens a separate fd so the holder is not interrupted.
+pub fn profile_is_busy(paths: &Paths, name: &str) -> bool {
+    if validate_name(name).is_err() {
+        return false;
+    }
+    let path = paths.state_dir.join("locks").join(format!("{name}.lock"));
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    matches!(try_exclusive(&file), Ok(false))
+}
+
 #[cfg(unix)]
 fn try_exclusive(file: &File) -> Result<bool> {
     use std::os::unix::io::AsRawFd;

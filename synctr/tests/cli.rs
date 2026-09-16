@@ -485,12 +485,7 @@ fn status_json_skips_bad_profile_toml_and_corrupt_last_run() {
     fs::create_dir_all(root.join("state/runs")).unwrap();
     fs::write(root.join("state/runs/docs.toml"), "not a last-run {{{").unwrap();
     let out = isolated(&root)
-        .args([
-            "--config-dir",
-            root.to_str().unwrap(),
-            "--json",
-            "status",
-        ])
+        .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
         .output()
         .unwrap();
     assert!(
@@ -532,6 +527,7 @@ fn status_json_matches_noctalia_plugin_fields() {
     let parsed: StatusSnapshot = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(parsed.profiles[0].name, "docs");
     assert!(parsed.profiles[0].last_run.is_none());
+    assert!(parsed.profiles[0].progress.is_none());
     assert_eq!(parsed.rclone.path.as_deref(), Some(fake.as_path()));
 
     let plugin = include_str!("../../contrib/noctalia/synctr/widget.luau");
@@ -543,6 +539,85 @@ fn status_json_matches_noctalia_plugin_fields() {
     assert!(plugin.contains("last.ok"));
     assert!(plugin.contains("noctalia.json.decode"));
     assert!(!plugin.contains("status --toml"));
+}
+
+#[test]
+fn status_json_reports_live_progress_then_omits_when_idle() {
+    let root = scratch();
+    let local = root.join("local");
+    fs::create_dir_all(&local).unwrap();
+    let fake = stub_rclone(&root);
+    add_docs(&root, &local, Some(&fake));
+    let json_line = r#"{"level":"info","msg":"Transferred","stats":{"bytes":100,"totalBytes":400,"speed":50,"eta":6,"transfers":1,"totalTransfers":4,"transferring":[{"name":"a.bin","percentage":25}]}}"#;
+
+    let child = isolated(&root)
+        .env("SYNCTR_STUB_STDERR", json_line)
+        .env("SYNCTR_STUB_SLEEP", "4")
+        .args([
+            "--config-dir",
+            root.to_str().unwrap(),
+            "--rclone",
+            fake.to_str().unwrap(),
+            "sync",
+            "docs",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut guard = Kill(child);
+
+    let start = Instant::now();
+    let mut seen = None;
+    while start.elapsed() < Duration::from_secs(3) {
+        let out = isolated(&root)
+            .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_status_json_contract(&parsed);
+        assert_eq!(parsed["profiles"][0]["name"], "docs");
+        if parsed["profiles"][0]["progress"]["bytes"] == 100 {
+            seen = Some(parsed);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let v = seen.expect("status --json should include live progress while rclone runs");
+    assert_eq!(v["profiles"][0]["progress"]["total_bytes"], 400);
+    assert_eq!(v["profiles"][0]["progress"]["percent"], 25);
+    assert_eq!(v["profiles"][0]["progress"]["file"], "a.bin");
+    assert_eq!(v["profiles"][0]["progress"]["speed_bps"], 50);
+    assert_eq!(v["profiles"][0]["progress"]["eta_secs"], 6);
+    assert!(v["rclone"].is_object());
+    let parsed: StatusSnapshot = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(parsed.profiles[0].progress.as_ref().unwrap().bytes, 100);
+
+    let _ = guard.0.kill();
+    let _ = guard.0.wait();
+    drop(guard);
+
+    let out = isolated(&root)
+        .args(["--config-dir", root.to_str().unwrap(), "--json", "status"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_status_json_contract(&parsed);
+    assert!(parsed["profiles"][0].get("progress").is_none());
 }
 
 #[test]

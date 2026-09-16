@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::paths::Paths;
 use crate::profile::{Mode, Profile, ProfileStore};
+use crate::progress::{live_progress, TransferProgress};
 use crate::rclone::{resolve_rclone_live, ResolvedRclone};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,11 +134,14 @@ pub struct ProfileStatus {
     pub extra_ignore: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run: Option<LastRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<TransferProgress>,
 }
 
 impl ProfileStatus {
     pub fn from_profile(paths: &Paths, profile: Profile) -> Result<Self> {
         let last_run = read_last_run(paths, &profile.name)?;
+        let progress = live_progress(paths, &profile.name);
         Ok(Self {
             name: profile.name,
             local: profile.local,
@@ -147,6 +151,7 @@ impl ProfileStatus {
             extra_flags: profile.extra_flags,
             extra_ignore: profile.extra_ignore,
             last_run,
+            progress,
         })
     }
 }
@@ -212,6 +217,21 @@ pub fn assert_status_json_contract(v: &serde_json::Value) {
                 }
             }
         }
+        if let Some(progress) = p.get("progress") {
+            if !progress.is_null() {
+                for key in [
+                    "bytes",
+                    "total_bytes",
+                    "transfers",
+                    "total_transfers",
+                    "dry_run",
+                    "updated_at_unix",
+                    "updated_at",
+                ] {
+                    assert!(progress.get(key).is_some(), "missing progress.{key}");
+                }
+            }
+        }
     }
     serde_json::from_value::<StatusSnapshot>(v.clone()).expect("StatusSnapshot deserialize");
 }
@@ -240,7 +260,7 @@ pub fn read_last_run(paths: &Paths, name: &str) -> Result<Option<LastRun>> {
     Ok(toml::from_str(&text).ok())
 }
 
-fn unix_to_rfc3339(secs: i64) -> String {
+pub(crate) fn unix_to_rfc3339(secs: i64) -> String {
     let z = secs.max(0) as u64;
     let days = (z / 86400) as i64;
     let rem = z % 86400;
@@ -321,6 +341,7 @@ mod tests {
                 extra_flags: vec!["--checksum".into()],
                 extra_ignore: vec!["*.key".into()],
                 last_run: None,
+                progress: None,
             }],
         };
         let json = status_json(&snap).unwrap();
@@ -333,6 +354,7 @@ mod tests {
         assert_status_json_contract(&v);
         assert!(v["rclone"].get("path").is_none());
         assert!(v["profiles"][0].get("last_run").is_none());
+        assert!(v["profiles"][0].get("progress").is_none());
         assert!(v["profiles"][0].get("rclone").is_none());
         let round: StatusSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(round, snap);
@@ -361,6 +383,7 @@ mod tests {
                     exit_code: 0,
                     ok: true,
                 }),
+                progress: None,
             }],
         };
         let json = status_json(&snap).unwrap();
@@ -443,5 +466,78 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_status_json_contract(&v);
         assert!(v["profiles"][0].get("last_run").is_none());
+        assert!(v["profiles"][0].get("progress").is_none());
+    }
+
+    #[test]
+    fn snapshot_json_includes_progress_only_while_locked() {
+        let (root, paths) = scratch("status-progress");
+        let bin = write_exec(&root, "rclone", "#!/bin/sh\nexit 0\n");
+        let store = ProfileStore::new(paths.clone());
+        let profile = Profile::new(
+            "docs".into(),
+            PathBuf::from("/tmp/docs"),
+            "b2:bucket/docs".into(),
+            Mode::Sync,
+            None,
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        store.add(&profile).unwrap();
+        let stale = crate::progress::TransferProgress {
+            bytes: 99,
+            total_bytes: 100,
+            percent: Some(99),
+            speed_bps: Some(1),
+            eta_secs: Some(1),
+            transfers: 1,
+            total_transfers: 1,
+            file: Some("old.bin".into()),
+            pid: Some(1),
+            dry_run: false,
+            updated_at_unix: 0,
+            updated_at: "1970-01-01T00:00:00Z".into(),
+        };
+        crate::progress::write_progress(&paths, "docs", &stale).unwrap();
+        let idle = status_snapshot(&store, Some(&bin), None).unwrap();
+        assert!(idle.profiles[0].progress.is_none());
+        let json = status_json(&idle).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_status_json_contract(&v);
+        assert!(v["profiles"][0].get("progress").is_none());
+
+        let _lock = crate::lock::try_lock_profile(&paths, "docs").unwrap();
+        let live = crate::progress::TransferProgress {
+            bytes: 100,
+            total_bytes: 400,
+            percent: Some(25),
+            speed_bps: Some(50),
+            eta_secs: Some(6),
+            transfers: 1,
+            total_transfers: 4,
+            file: Some("a.bin".into()),
+            pid: Some(42),
+            dry_run: true,
+            updated_at_unix: 0,
+            updated_at: "1970-01-01T00:00:00Z".into(),
+        };
+        crate::progress::write_progress(&paths, "docs", &live).unwrap();
+        let snap = status_snapshot(&store, Some(&bin), None).unwrap();
+        let json = status_json(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_status_json_contract(&v);
+        assert_eq!(v["profiles"][0]["name"], "docs");
+        assert_eq!(v["profiles"][0]["progress"]["bytes"], 100);
+        assert_eq!(v["profiles"][0]["progress"]["total_bytes"], 400);
+        assert_eq!(v["profiles"][0]["progress"]["percent"], 25);
+        assert_eq!(v["profiles"][0]["progress"]["speed_bps"], 50);
+        assert_eq!(v["profiles"][0]["progress"]["eta_secs"], 6);
+        assert_eq!(v["profiles"][0]["progress"]["file"], "a.bin");
+        assert_eq!(v["profiles"][0]["progress"]["dry_run"], true);
+        assert_eq!(v["rclone"]["found"], true);
+        drop(_lock);
+        let after = status_snapshot(&store, Some(&bin), None).unwrap();
+        assert!(after.profiles[0].progress.is_none());
     }
 }

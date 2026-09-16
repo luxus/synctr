@@ -58,6 +58,10 @@ impl Paths {
             .join("filters")
             .join(format!("{name}.filter"))
     }
+
+    pub fn progress_file(&self, name: &str) -> PathBuf {
+        self.state_dir.join("progress").join(format!("{name}.json"))
+    }
 }
 
 fn home() -> PathBuf {
@@ -111,6 +115,10 @@ mod tests {
         assert_eq!(
             p.profile_ignore("docs"),
             PathBuf::from("/tmp/synctr-cfg/profiles/docs.ignore")
+        );
+        assert_eq!(
+            p.progress_file("docs"),
+            PathBuf::from("/tmp/synctr-cfg/state/progress/docs.json")
         );
     }
 
